@@ -93,11 +93,11 @@ do
     [1] = { index = 1, instrument_name = "Dark Dreams 1",
             protocol = "AU", identifier = "aumu:NiR5:-NI-",
             display_name = "AU: Native Instruments: Reaktor5",
-            preset_name = "Razor" },
+            preset_name = "Razor", active_program = 48 },
     ["Dark Dreams 1"] = { index = 1, instrument_name = "Dark Dreams 1",
             protocol = "AU", identifier = "aumu:NiR5:-NI-",
             display_name = "AU: Native Instruments: Reaktor5",
-            preset_name = "Razor" },
+            preset_name = "Razor", active_program = 48 },
   }
   local entries = up_inventory.scan(mock_song, nil, nil, nil, recovery)
   local dd
@@ -109,6 +109,7 @@ do
     "recovered from song.xml as Reaktor5 (not the opaque 'aumu:NiR5' path)")
   check(dd and dd.active_preset_name == "Razor",
     "loaded Reaktor ensemble ('Razor') recovered as preset name")
+  check(dd and dd.active_preset == 48, "active program number recovered from song.xml")
   check(dd and dd.recovered and dd.broken, "marked recovered + broken")
 end
 

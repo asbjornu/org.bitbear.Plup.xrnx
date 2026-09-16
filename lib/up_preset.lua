@@ -69,6 +69,22 @@ function up_preset._extract_chunk_name(data)
   return nil
 end
 
+-- Return the raw "file://.../Name.ext" ensemble/preset URL embedded in a plugin's
+-- state chunk, if any (raw binary blob or base64-encoded .xrns CDATA). Its
+-- presence identifies a *container* plugin (Reaktor/Kontakt) whose patch lives in
+-- an external ensemble file, as opposed to a plugin with a flat factory bank.
+function up_preset.find_ensemble_url(data)
+  if type(data) ~= "string" or data == "" then return nil end
+  local url = data:match("file://[^%z%s\"'<>]+")
+  if url then return url end
+  if data:find("\0") or data:find("[^A-Za-z0-9+/=%s]") then return nil end
+  local ok, dec = pcall(_b64decode, data)
+  if ok and dec and dec ~= "" then
+    return dec:match("file://[^%z%s\"'<>]+")
+  end
+  return nil
+end
+
 function up_preset.extract_name(device)
   if not device then
     return nil

@@ -119,6 +119,7 @@ do
     .. '<PluginGenerator><PluginDevice>\n<PluginType>AU</PluginType>\n'
     .. '<PluginIdentifier>aumu:NiR5:-NI-</PluginIdentifier>\n'
     .. '<PluginDisplayName>AU: Native Instruments: Reaktor5</PluginDisplayName>\n'
+    .. '<ActiveProgram>48</ActiveProgram>\n'
     .. '<ParameterChunk><![CDATA[' .. chunk .. ']]></ParameterChunk>\n'
     .. '</PluginDevice></PluginGenerator>\n</Instrument>\n</Song>'
   local info = up_song_xml.parse_instruments(xml)
@@ -126,6 +127,10 @@ do
     "loaded Reaktor ensemble recovered from ParameterChunk (Razor)")
   check(info["Dark Dreams 1"] and info["Dark Dreams 1"].preset_name == "Razor",
     "preset recoverable by live instrument name")
+  check(info[1] and info[1].active_program == 48,
+    "active plugin program number recovered from Song.xml")
+  check(info[1] and info[1].ensemble_url ~= nil,
+    "ensemble file URL recovered (marks a container plugin)")
 end
 
 section("up_song_xml.parse_instruments keeps every instrument inside a group")

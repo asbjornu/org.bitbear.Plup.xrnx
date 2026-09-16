@@ -165,6 +165,123 @@ do
     "the active program is the old patch")
 end
 
+section("up_swap.swap_instrument resolves the patch when the bank loads in stages")
+do
+  -- A healthy Reaktor reports its active preset name ("Dark Dreams") and, from the
+  -- chunk, the ensemble name ("Razor"). The candidate order can put the patch first
+  -- even though the ensemble must be selected before the patch exists in the bank;
+  -- a second pass must therefore re-resolve the patch.
+  local snapshots = {}
+  for i = 1, 60 do snapshots[i] = "Snap " .. i end
+  snapshots[48] = "Dark Dreams"
+  local state = { active_preset = 0 }
+  local new_dev = setmetatable({ is_active = true, active_preset_data = "", parameters = {} }, {
+    __index = function(_, key)
+      if key == "active_preset" then return state.active_preset end
+      if key == "presets" then
+        if state.active_preset == 0 then return { "Razor.rkplr" } end
+        return snapshots
+      end
+      return nil
+    end,
+    __newindex = function(_, key, value)
+      if key == "active_preset" then state.active_preset = value
+      else rawset(_, key, value) end
+    end,
+  })
+  local pp = { plugin_loaded = true,
+    plugin_device = { device_path = "/P/Reaktor5.au", name = "AU: Native Instruments: Reaktor5",
+      active_preset = 0, presets = {},
+      active_preset_data = "\0file://localhost/Users/Shared/Razor/Razor.rkplr\0", parameters = {} },
+    load_plugin = function(self, _p) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, automation = function() return nil end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
+    instrument_name = "Dark Dreams 1", active_preset_name = "Dark Dreams",
+    analysis = analyze("AU: Native Instruments: Reaktor5", nil, "AU"), device_path = "/P/Reaktor5.au" }
+  local candidate = analyze("VST3: Native Instruments: Reaktor 6", "/P/Reaktor6.vst3", "VST3")
+  candidate.path = "/P/Reaktor6.vst3"
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-name-matched-preset",
+    "the patch is found after the ensemble populates the bank")
+  check(state.active_preset == 48, "the Dark Dreams snapshot is active")
+end
+
+section("up_swap.swap_instrument restores the active program number")
+do
+  -- Reaktor 5 and 6 share the program bank: program 48 is the same snapshot. When
+  -- the snapshot's name can't be matched (it lives only in the old opaque chunk)
+  -- the recorded program number is restored instead, after the ensemble is loaded.
+  local snapshots = {}
+  for i = 1, 60 do snapshots[i] = "Snap " .. i end
+  local state = { active_preset = 0 }
+  local new_dev = setmetatable({ is_active = true, active_preset_data = "", parameters = {} }, {
+    __index = function(_, key)
+      if key == "active_preset" then return state.active_preset end
+      if key == "presets" then
+        if state.active_preset == 0 then return { "Razor.rkplr" } end
+        return snapshots
+      end
+      return nil
+    end,
+    __newindex = function(_, key, value)
+      if key == "active_preset" then state.active_preset = value
+      else rawset(_, key, value) end
+    end,
+  })
+  local pp = { plugin_loaded = false, plugin_device = nil,
+    load_plugin = function(self, _p) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, automation = function() return nil end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = true, plugin_loaded = false,
+    instrument_name = "Dark Dreams 1", active_preset_name = "Razor", active_preset = 48,
+    ensemble_preset = true,
+    analysis = analyze("AU: Native Instruments: Reaktor5", nil, "AU"), device_path = nil }
+  local candidate = analyze("VST3: Native Instruments: Reaktor 6", "/P/Reaktor6.vst3", "VST3")
+  candidate.path = "/P/Reaktor6.vst3"
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-name-matched-preset",
+    "the ensemble is loaded and the program number restored")
+  check(state.active_preset == 48, "the recorded program number (48) is restored")
+end
+
+section("up_swap.swap_instrument does not carry a program number to a flat bank")
+do
+  -- A normal plugin (no ensemble file) has a flat factory bank, so the old
+  -- program number may mean a different preset in the new version. The name match
+  -- must win and the number must not be applied.
+  local new_dev = { is_active = true, active_preset_data = "", presets = { "Some Preset" }, parameters = {} }
+  local pp = { plugin_loaded = true,
+    plugin_device = { device_path = "/P/ProQ2.vst3", name = "VST3: FabFilter Pro-Q 2",
+      active_preset = 5, presets = { "Some Preset" }, active_preset_data = "", parameters = {} },
+    load_plugin = function(self, _p) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, automation = function() return nil end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
+    instrument_name = "ProQ", active_preset_name = "Some Preset", active_preset = 5,
+    analysis = analyze("VST3: FabFilter Pro-Q 2", "/P/ProQ2.vst3", "VST3"), device_path = "/P/ProQ2.vst3" }
+  local candidate = analyze("VST3: FabFilter Pro-Q 3", "/P/ProQ3.vst3", "VST3")
+  candidate.path = "/P/ProQ3.vst3"
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-name-matched-preset",
+    "the flat-bank preset is matched by name")
+  check(new_dev.active_preset == 1, "the name match is kept, not the old program number")
+end
+
+section("up_swap.swap_instrument matches a bank name that lacks the index suffix")
+do
+  -- Renoise instrument names carry a numeric suffix ("Dark Dreams 1") while the
+  -- Reaktor snapshot does not ("Dark Dreams"); the lookup must ignore the suffix.
+  local new_dev = { is_active = true, active_preset_data = "", presets = { "Dark Dreams" }, parameters = {} }
+  local pp = { plugin_loaded = false, plugin_device = nil,
+    load_plugin = function(self, _p) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, automation = function() return nil end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = true, plugin_loaded = false,
+    instrument_name = "Dark Dreams 1", analysis = { protocol = "AU" }, device_path = nil }
+  local candidate = { path = "/P/Reaktor6.au", protocol = "VST3" }
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-name-matched-preset",
+    "the suffix-less snapshot name is matched")
+  check(new_dev.active_preset == 1, "the Dark Dreams snapshot is selected")
+end
+
 section("coverage: up_swap.swap_track_device upgrades a track plugin")
 do
   local track = {

@@ -118,10 +118,17 @@ function up_song_xml.parse_instruments(xml)
       -- this machine (so the live API exposes no preset name). Attribute-bearing and
       -- indented ParameterChunks are handled by the tree parser for free.
       local preset_name
+      local ensemble_url
       local cdata = up_xml.descendant_cdata(block, "ParameterChunk")
       if cdata then
         preset_name = up_preset.extract_name({ active_preset_data = cdata })
+        ensemble_url = up_preset.find_ensemble_url(cdata)
       end
+      -- Renoise records the active plugin program number. Reaktor keeps the same
+      -- program bank across major versions (Razor's snapshots), so carrying the
+      -- number over lets the replacement select the same patch even when the
+      -- snapshot name can't be recovered (e.g. it lives only in the opaque chunk).
+      local active_program = tonumber(up_xml.descendant_text(block, "ActiveProgram"))
       local entry = {
         index = idx,
         instrument_name = iname,
@@ -130,6 +137,8 @@ function up_song_xml.parse_instruments(xml)
         display_name = disp or sdisp,
         short_display_name = sdisp or disp,
         preset_name = preset_name,
+        ensemble_url = ensemble_url,
+        active_program = active_program,
       }
       out[idx] = entry
       if iname then out[iname] = entry end

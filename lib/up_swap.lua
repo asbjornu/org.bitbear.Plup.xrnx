@@ -1,6 +1,20 @@
 local up_preset = require("up_preset")
+local up_plugin_analysis = require("up_plugin_analysis")
 
 local up_swap = {}
+
+-- True when the old and new plugins are the same product family (version aside),
+-- e.g. Reaktor5 -> Reaktor6. Vendor prefixes are asymmetric (the live API may
+-- report "Reaktor 6" without "Native Instruments"), so compare significant tokens
+-- with subset in either direction rather than requiring identical stems.
+local function same_family(old_analysis, new_analysis)
+  if not old_analysis or not new_analysis then return false end
+  local old_tokens = up_plugin_analysis.token_set(old_analysis.base or old_analysis.product or "")
+  local new_tokens = up_plugin_analysis.token_set(new_analysis.base or new_analysis.product or "")
+  if not next(old_tokens) or not next(new_tokens) then return false end
+  return up_plugin_analysis.token_subset(old_tokens, new_tokens)
+    or up_plugin_analysis.token_subset(new_tokens, old_tokens)
+end
 
 -- Capture the old plugin's exposed parameter values so we can re-apply them to
 -- the replacement plugin as a best-effort "synthesized" preset when the native
@@ -209,6 +223,8 @@ end
 -- while the name recovered from the plugin state is the extension-less base
 -- ("Razor"), so exact equality misses. Compare exact first, then on the trimmed,
 -- extension-stripped, case-folded base name so either spelling selects the entry.
+-- Also ignore a trailing numeric suffix, because Renoise instrument names carry
+-- one ("Dark Dreams 1") while the Reaktor snapshot does not ("Dark Dreams").
 local function preset_name_matches(wanted, candidate)
   if type(wanted) ~= "string" or type(candidate) ~= "string" then return false end
   if wanted == candidate then return true end
@@ -217,8 +233,14 @@ local function preset_name_matches(wanted, candidate)
     if trimmed == "" then return "" end
     return (trimmed:match("^(.-)%.%w+$") or trimmed):lower()
   end
+  local function strip_index(name)
+    return (name:gsub("%s+%d+$", ""))
+  end
   local wanted_base = base(wanted)
-  return wanted_base ~= "" and wanted_base == base(candidate)
+  if wanted_base == "" then return false end
+  local candidate_base = base(candidate)
+  return wanted_base == candidate_base
+    or strip_index(wanted_base) == strip_index(candidate_base)
 end
 
 -- Load the first of `preset_names` that exists in the new plugin's preset/program
@@ -226,21 +248,33 @@ end
 -- successful load, so a container plugin whose bank changes once an ensemble is
 -- selected (e.g. Reaktor: selecting the "Razor" ensemble replaces the program
 -- list with that ensemble's snapshots) can then resolve the patch name that
--- follows it. Returns true when at least one preset was loaded.
+-- follows it. A pass that changes the active program triggers another pass, so
+-- the patch is still found when the ensemble name happens to be tried first
+-- (or vice versa). Returns true when at least one preset was loaded.
 local function load_matching_preset(new_device, preset_names)
   if type(preset_names) ~= "table" then return false end
+  local function active_index()
+    local ok_active, active = pcall(function() return new_device.active_preset end)
+    return ok_active and active or nil
+  end
   local loaded = false
-  for _, wanted in ipairs(preset_names) do
-    local ok_presets, presets = pcall(function() return new_device.presets end)
-    if ok_presets and presets then
-      for index, preset_name in ipairs(presets) do
-        if preset_name_matches(wanted, preset_name) then
-          local ok_set = pcall(function() new_device.active_preset = index end)
-          if ok_set then loaded = true end
-          break
+  for _ = 1, #preset_names + 1 do
+    local before = active_index()
+    for _, wanted in ipairs(preset_names) do
+      local ok_presets, presets = pcall(function() return new_device.presets end)
+      if ok_presets and presets then
+        for index, preset_name in ipairs(presets) do
+          if preset_name_matches(wanted, preset_name) then
+            local ok_set = pcall(function() new_device.active_preset = index end)
+            if ok_set then loaded = true end
+            break
+          end
         end
       end
     end
+    -- Stop once a full pass no longer moves the active program: the bank has
+    -- stabilised (or nothing matched), so another pass cannot find anything new.
+    if active_index() == before then break end
   end
   return loaded
 end
@@ -255,7 +289,7 @@ end
 -- (matched by name) on top -- which is what actually carries the user's tweaks
 -- such as Mix. If no parameters map, we keep the loaded preset; otherwise we
 -- return the synthesized result.
-local function transfer_state(new_device, old_data, preset_names, same_format, old_parameters)
+local function transfer_state(new_device, old_data, preset_names, same_format, old_parameters, old_active_preset)
   if old_data and old_data ~= "" and same_format then
     local ok = pcall(function() new_device.active_preset_data = old_data end)
     if ok then
@@ -269,6 +303,23 @@ local function transfer_state(new_device, old_data, preset_names, same_format, o
   -- Establish a base state from a same-named factory preset (if one exists in
   -- the new plugin). This gives unmapped parameters a sensible starting point.
   local preset_loaded = load_matching_preset(new_device, preset_names)
+
+  -- Container plugins (Reaktor and friends) keep the patch as a program number in
+  -- a bank supplied by the loaded ensemble. Same-family versions share that
+  -- numbering (Reaktor 5 -> 6: program 48 is the same snapshot), so after name
+  -- matching has loaded the ensemble, restore the exact program number. Only
+  -- containers reach here (callers pass old_active_preset only then), so a flat
+  -- factory bank (e.g. Pro-Q) is never clobbered. Read the value back to be sure
+  -- the plugin accepted it.
+  if old_active_preset and old_active_preset > 0 then
+    local ok_set = pcall(function() new_device.active_preset = old_active_preset end)
+    if ok_set then
+      local ok_get, got = pcall(function() return new_device.active_preset end)
+      if ok_get and got == old_active_preset then
+        preset_loaded = true
+      end
+    end
+  end
 
   -- Overlay the old plugin's saved parameter values on top of the base. This is
   -- what actually carries the user's tweaks (e.g. Mix) across formats, since it
@@ -307,6 +358,12 @@ function up_swap.swap_track_device(song, record, candidate)
   local was_broken = record.broken
   local old_protocol = record.analysis and record.analysis.protocol
   local same_format = (old_protocol and old_protocol == candidate.protocol)
+  -- The program number is only meaningful for a same-family container plugin whose
+  -- patch lives in an external ensemble (Reaktor): a "file://" reference in the old
+  -- chunk, or one recovered from the song for a missing plugin.
+  local container = (old_data and old_data:find("file://") ~= nil) or record.ensemble_preset
+  local old_active_preset = (same_family(record.analysis, candidate) and container)
+    and record.active_preset or nil
 
   -- See swap_instrument: skip a candidate that is already the loaded device.
   if record.device_path and record.device_path == candidate.path then
@@ -326,7 +383,7 @@ function up_swap.swap_track_device(song, record, candidate)
   end
   local new_device = inserted_or_error
   local automation_count = rebind_automation(captured_automation, new_device)
-  local method, err = transfer_state(new_device, old_data, preset_names, same_format, old_parameters)
+  local method, err = transfer_state(new_device, old_data, preset_names, same_format, old_parameters, old_active_preset)
   -- Set is_active last: transfer_state may load a base preset, which can reset
   -- the device to active; applying it afterwards keeps the old bypass state.
   if old_active ~= nil then
@@ -401,6 +458,12 @@ function up_swap.swap_instrument(song, record, candidate)
   local was_broken = record.broken
   local old_protocol = record.analysis and record.analysis.protocol
   local same_format = (old_protocol and old_protocol == candidate.protocol)
+  -- The program number is only meaningful for a same-family container plugin whose
+  -- patch lives in an external ensemble (Reaktor): a "file://" reference in the old
+  -- chunk, or one recovered from the song for a missing plugin.
+  local container = (old_data and old_data:find("file://") ~= nil) or record.ensemble_preset
+  local old_active_preset = (same_family(record.analysis, candidate) and container)
+    and record.active_preset or nil
 
   -- No-op upgrade: the candidate is the plugin that is already loaded at this
   -- instrument. Reloading it (via load_plugin) is wasted work and, for heavy
@@ -435,7 +498,7 @@ function up_swap.swap_instrument(song, record, candidate)
       detail = "new plugin device unavailable after load",
     }
   end
-  local method, err = transfer_state(new_device, old_data, preset_names, same_format, old_parameters)
+  local method, err = transfer_state(new_device, old_data, preset_names, same_format, old_parameters, old_active_preset)
   if method then
     local status = method == "parameters" and "upgraded-with-parameters"
       or method == "name" and "upgraded-name-matched-preset"

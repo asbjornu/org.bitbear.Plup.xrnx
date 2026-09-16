@@ -116,6 +116,12 @@ local function apply_recovered(record, recovery_entry)
   if recovery_entry.preset_name then
     record.active_preset_name = recovery_entry.preset_name
   end
+  if recovery_entry.active_program and recovery_entry.active_program > 0 then
+    record.active_preset = recovery_entry.active_program
+  end
+  if recovery_entry.ensemble_url then
+    record.ensemble_preset = true
+  end
   return true
 end
 
