@@ -339,6 +339,101 @@ do
   _G.renoise.song = real_song
 end
 
+section("coverage: up_ui.do_upgrade defers a Reaktor run with no loopback")
+do
+  local up_ui = require("up_ui")
+  up_ui._view_builder = _G.renoise.ViewBuilder
+  up_ui._list_box = up_ui._view_builder:column{}
+  up_ui._status_text = up_ui._view_builder:text{ text = "" }
+  up_ui._upgrade_btn = up_ui._view_builder:button{ text = "Upgrade", active = false }
+  up_ui._dialog = { visible = true }
+  up_ui._closed = false
+  up_ui._results = nil
+
+  local song = { instruments = {}, tracks = {}, automation = function() return nil end }
+  local real_song = _G.renoise.song
+  _G.renoise.song = function() return song end
+
+  -- A selected Reaktor (container) row, but no MIDI loopback available.
+  local cand = analyze("VST3: Native Instruments: Reaktor 6", "/P/Reaktor6.vst3", "VST3")
+  local rec = { kind = "instrument", instrument_index = 1, broken = false,
+    device_path = "/P/Reaktor5.vst", ensemble_preset = true, active_preset_name = "Razor",
+    analysis = analyze("VST: Native Instruments: Reaktor5", nil, "VST") }
+  local rc = { entry = rec, candidates = { cand }, candidate = cand, status = nil }
+  up_ui._results = { rc }
+  up_ui._row_views = { { popup = { value = 2, active = true }, candidates = { cand },
+    result_txt = up_ui._view_builder:text{ text = "" }, old_text_field = up_ui._view_builder:text{ text = "" } } }
+  up_ui._upgrading = false
+
+  local real_prompt = up_ui.show_reaktor_midi_help
+  local prompted = false
+  up_ui.show_reaktor_midi_help = function() prompted = true; return nil end -- user cancels
+  up_ui.do_upgrade()
+  check(prompted, "the Reaktor MIDI setup prompt is offered when no loopback exists")
+  check(up_ui._upgrading ~= true, "the upgrade does not start when setup is cancelled")
+  check(rc.status == nil, "no swap happens when the setup prompt is cancelled")
+  check(up_ui._row_views[1].popup.active == true,
+    "row controls stay usable when the setup prompt is cancelled")
+
+  -- Confirming the prompt without enabling a port must not recurse (which would
+  -- re-prompt and grow the stack); it reports the missing port instead.
+  local prompt_count = 0
+  up_ui.show_reaktor_midi_help = function() prompt_count = prompt_count + 1; return "configured" end
+  up_ui._row_views[1].popup.active = true
+  rc.status = nil
+  up_ui.do_upgrade()
+  check(prompt_count == 1, "the setup prompt is shown once, not recursively")
+  check(up_ui._upgrading ~= true and rc.status == nil,
+    "the upgrade does not start when the port is still missing after confirmation")
+  check(up_ui._status_text.text:find("No MIDI loopback") ~= nil,
+    "a missing loopback after confirmation is reported in the status line")
+
+  up_ui.show_reaktor_midi_help = real_prompt
+  _G.renoise.song = real_song
+end
+
+section("coverage: up_ui.do_upgrade does not gate a non-Reaktor container")
+do
+  local up_ui = require("up_ui")
+  up_ui._view_builder = _G.renoise.ViewBuilder
+  up_ui._list_box = up_ui._view_builder:column{}
+  up_ui._status_text = up_ui._view_builder:text{ text = "" }
+  up_ui._upgrade_btn = up_ui._view_builder:button{ text = "Upgrade", active = false }
+  up_ui._dialog = { visible = true }
+  up_ui._closed = false
+
+  local song = { instruments = {}, tracks = {}, automation = function() return nil end }
+  local real_song = _G.renoise.song
+  _G.renoise.song = function() return song end
+
+  -- A file-backed container that is not Reaktor (e.g. Kontakt) must not be
+  -- prompted for the Reaktor MIDI setup.
+  local cand = analyze("VST3: Native Instruments: Kontakt 7", "/P/Kontakt7.vst3", "VST3")
+  local rec = { kind = "instrument", instrument_index = 1, broken = false,
+    device_path = "/P/Kontakt6.vst", ensemble_preset = true,
+    analysis = analyze("VST: Native Instruments: Kontakt6", nil, "VST") }
+  local rc = { entry = rec, candidates = { cand }, candidate = cand, status = nil }
+  up_ui._results = { rc }
+  up_ui._row_views = { { popup = { value = 2, active = true }, candidates = { cand },
+    result_txt = up_ui._view_builder:text{ text = "" }, old_text_field = up_ui._view_builder:text{ text = "" } } }
+  up_ui._upgrading = false
+
+  local real_prompt = up_ui.show_reaktor_midi_help
+  local prompted = false
+  up_ui.show_reaktor_midi_help = function() prompted = true; return nil end
+  up_ui.do_upgrade()
+  check(not prompted, "a non-Reaktor container is not prompted for Reaktor MIDI setup")
+  -- The run may proceed (or fail later); what matters is it was not gated here.
+  check(up_ui._upgrading == true or rc.status ~= nil,
+    "a non-Reaktor container is allowed to proceed past the gate")
+  -- Stop the run we may have started so no idle notifier leaks into later tests.
+  if up_ui._upgrading then up_ui.do_upgrade() end -- acts as Stop
+  up_ui._upgrading = false
+
+  up_ui.show_reaktor_midi_help = real_prompt
+  _G.renoise.song = real_song
+end
+
 section("coverage: up_ui.do_upgrade with no selection and reconcile reuse")
 do
   local up_ui = require("up_ui")
