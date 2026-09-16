@@ -96,6 +96,75 @@ do
     "empty parenthetical does not shadow the real preset name")
 end
 
+section("up_swap.swap_instrument selects the recovered Reaktor ensemble")
+do
+  -- A missing Reaktor exposes no live preset, but its loaded ensemble ("Razor")
+  -- is recovered from Song.xml into active_preset_name. The replacement must
+  -- select that ensemble (not only try the instrument-name patch), otherwise the
+  -- new Reaktor6 instance opens without Razor loaded. Reaktor's bank labels the
+  -- entry with its file extension ("Razor.rkplr"), so the match must ignore it.
+  local new_dev = {
+    is_active = true, active_preset_data = "", presets = { "Razor.rkplr", "Other.rkplr" }, parameters = {} }
+  local pp = {
+    plugin_loaded = false, plugin_device = nil,
+    load_plugin = function(self, _path) self.plugin_device = new_dev; return true end,
+  }
+  local song = { instruments = { { plugin_properties = pp } }, automation = function() return nil end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = true, plugin_loaded = false,
+    instrument_name = "Dark Dreams 1", active_preset_name = "Razor",
+    analysis = { protocol = "AU" }, device_path = nil }
+  local candidate = { path = "/P/Reaktor6.au", protocol = "AU" }
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok, "swap_instrument handles a recovered Reaktor ensemble")
+  check(ok and res and res.status == "upgraded-name-matched-preset",
+    "recovered ensemble name matches an extension-bearing program")
+  check(new_dev.active_preset == 1, "replacement selects the recovered Razor.rkplr ensemble")
+end
+
+section("up_swap.swap_instrument selects the ensemble then its patch")
+do
+  -- Reaktor's program bank changes once an ensemble is selected: loading "Razor"
+  -- exposes that ensemble's snapshots, so the user's patch ("Dark Dreams 1") can
+  -- be resolved too. The preset list must be re-read after each load so both the
+  -- ensemble and the old preset end up selected. Bank entries carry file
+  -- extensions, while the recovered/instrument names do not.
+  local state = { active_preset = 0, selected = {} }
+  local new_dev = setmetatable({ is_active = true, active_preset_data = "", parameters = {} }, {
+    __index = function(_, key)
+      if key == "active_preset" then return state.active_preset end
+      if key == "presets" then
+        if state.active_preset == 0 then return { "Razor.rkplr", "Other Ensemble.rkplr" } end
+        return { "Bright Dreams.nrkt", "Dark Dreams 1.nrkt" }
+      end
+      return nil
+    end,
+    __newindex = function(_, key, value)
+      if key == "active_preset" then
+        state.active_preset = value
+        state.selected[#state.selected + 1] = value
+      else
+        rawset(_, key, value)
+      end
+    end,
+  })
+  local pp = {
+    plugin_loaded = false, plugin_device = nil,
+    load_plugin = function(self, _path) self.plugin_device = new_dev; return true end,
+  }
+  local song = { instruments = { { plugin_properties = pp } }, automation = function() return nil end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = true, plugin_loaded = false,
+    instrument_name = "Dark Dreams 1", active_preset_name = "Razor",
+    analysis = { protocol = "AU" }, device_path = nil }
+  local candidate = { path = "/P/Reaktor6.au", protocol = "AU" }
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-name-matched-preset",
+    "replacement loads the ensemble and then the patch")
+  check(state.selected[1] == 1, "the Razor ensemble is selected first")
+  check(state.selected[2] == 2, "the old patch within Razor is selected next")
+  check(new_dev.presets[state.active_preset] == "Dark Dreams 1.nrkt",
+    "the active program is the old patch")
+end
+
 section("coverage: up_swap.swap_track_device upgrades a track plugin")
 do
   local track = {

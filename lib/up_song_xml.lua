@@ -17,7 +17,7 @@ local up_preset = require("up_preset")
 -- default state unless the user's preset name (the instrument name) resolves in
 -- the installed plugin's own bank.
 
-local _cache = { file = nil, data = nil }
+local _cache = { file = nil, data = nil, parsed = nil }
 
 -- up_xml.descendant_text returns "" (truthy) for an empty or self-closing element,
 -- e.g. <PluginShortDisplayName/>. Left as-is that empty string wins every
@@ -70,6 +70,9 @@ local function read_song_xml(song)
   if ok_z and xml and xml ~= "" then
     _cache.file = path
     _cache.data = xml
+    -- The parsed tree belongs to the previous raw XML, so drop it here; recover()
+    -- rebuilds and caches it lazily.
+    _cache.parsed = nil
     return xml
   end
   return nil
@@ -146,12 +149,19 @@ function up_song_xml.recover(song)
   if not xml then
     return {}
   end
-  return up_song_xml.parse_instruments(xml)
+  -- Parsing the whole Song.xml tree is the expensive part, and recover() is called
+  -- repeatedly for the same song (e.g. per-row reinspection after an upgrade, while
+  -- the file on disk is unchanged). Cache the parsed result so it runs once per song.
+  if not _cache.parsed then
+    _cache.parsed = up_song_xml.parse_instruments(xml)
+  end
+  return _cache.parsed
 end
 
 function up_song_xml.invalidate_cache()
   _cache.file = nil
   _cache.data = nil
+  _cache.parsed = nil
 end
 
 return up_song_xml

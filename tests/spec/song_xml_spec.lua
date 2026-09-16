@@ -221,6 +221,23 @@ do
   local r1 = up_song_xml.recover({ file_name = fixture })
   local r2 = up_song_xml.recover({ file_name = fixture })
   check(r1 ~= nil and r2 ~= nil, "recover returns parsed identity table from the fixture")
+
+  -- recover() must not re-parse the whole Song.xml on every call: the post-upgrade
+  -- refresh calls it once per upgraded instrument, so repeated calls must reuse the
+  -- cached tree instead of paying the full SLAXML parse each time.
+  up_song_xml.invalidate_cache()
+  local real_parse = up_song_xml.parse_instruments
+  local parse_calls = 0
+  up_song_xml.parse_instruments = function(xml)
+    parse_calls = parse_calls + 1
+    return real_parse(xml)
+  end
+  local c1 = up_song_xml.recover({ file_name = fixture })
+  local c2 = up_song_xml.recover({ file_name = fixture })
+  up_song_xml.parse_instruments = real_parse
+  check(parse_calls == 1, "the Song.xml tree is parsed once and reused across recover() calls")
+  check(c1 == c2, "recover returns the cached parsed table")
+
   up_song_xml.invalidate_cache()
   local empty = up_song_xml.recover({ file_name = "" })
   check(empty ~= nil and type(empty) == "table", "recover returns a table when no song file exists")
