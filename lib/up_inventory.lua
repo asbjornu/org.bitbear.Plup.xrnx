@@ -1,4 +1,5 @@
 local up_plugin_analysis = require("up_plugin_analysis")
+local up_preset = require("up_preset")
 local up_song_xml = require("up_song_xml")
 
 local up_inventory = {}
@@ -116,11 +117,22 @@ local function apply_recovered(record, recovery_entry)
   if recovery_entry.preset_name then
     record.active_preset_name = recovery_entry.preset_name
   end
-  if recovery_entry.active_program and recovery_entry.active_program > 0 then
-    record.active_preset = recovery_entry.active_program
+  if recovery_entry.active_program and recovery_entry.active_program >= 0 then
+    -- Song.xml stores <ActiveProgram> 0-based (-1 for none); the live
+    -- device.active_preset API is 1-based, so normalise to the API convention.
+    record.active_preset = recovery_entry.active_program + 1
   end
   if recovery_entry.ensemble_url then
     record.ensemble_preset = true
+  end
+  if recovery_entry.preset_data and recovery_entry.preset_data ~= "" then
+    record.active_preset_data = recovery_entry.preset_data
+    -- A container plugin (Reaktor) embeds a "file://" ensemble reference in its
+    -- decoded chunk, so remember it: the swap needs to know that the patch lives
+    -- in the opaque state, not in a flat factory bank.
+    if up_preset.find_ensemble_url(recovery_entry.preset_data) then
+      record.ensemble_preset = true
+    end
   end
   return true
 end
@@ -174,6 +186,14 @@ local function inspect_instrument(instrument, instrument_index, recovery)
       record.preset_data_accessible = true
       record.preset_data_len = preset_data and #preset_data or 0
       record.active_preset_data = preset_data
+      -- A loaded container plugin (Reaktor) also hides its ensemble reference in
+      -- the decoded chunk, so flag it here too: the upgrade and the MIDI-setup
+      -- prompt both key off this, and a loaded device returns before the
+      -- Song.xml recovery path that would otherwise set it.
+      if preset_data and preset_data ~= ""
+        and up_preset.find_ensemble_url(up_preset.chunk_bytes(preset_data)) then
+        record.ensemble_preset = true
+      end
     end
     local active_preset_ok, active_preset = pcall(function() return plugin_device.active_preset end)
     if active_preset_ok then

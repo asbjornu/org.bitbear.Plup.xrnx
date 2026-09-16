@@ -5,3 +5,6 @@ coverage.lcov
 # the build no longer depends on LuaRocks' slaxml package, whose rockspec points
 # at a git tag that no longer exists upstream.
 
+
+# Renoise tool preferences (runtime state, not source)
+preferences.xml

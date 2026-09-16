@@ -28,6 +28,34 @@ local function _b64decode(encoded)
   return table.concat(bytes)
 end
 
+-- Reaktor stores the loaded ensemble reference as UTF-16LE inside its state
+-- chunk ("f\0i\0l\0e\0:\0/\0/\0Razor.rkplr"), so an ASCII `file://` pattern
+-- never matches it. Find the UTF-16 marker and read the printable low byte of
+-- each pair until the characters stop looking like a path, then return the URL
+-- in plain ASCII form.
+local function _utf16_file_url(blob)
+  local marker = "f\0i\0l\0e\0:\0/\0/\0"
+  local start = blob:find(marker, 1, true)
+  if not start then return nil end
+  local pos = start + #marker
+  local out = {}
+  while pos + 1 <= #blob do
+    local lo, hi = blob:byte(pos), blob:byte(pos + 1)
+    if hi ~= 0 or lo < 32 or lo > 126 then break end
+    out[#out + 1] = string.char(lo)
+    pos = pos + 2
+  end
+  if #out == 0 then return nil end
+  return "file://" .. table.concat(out)
+end
+
+-- First ensemble/preset URL in a chunk, in plain ASCII or Reaktor's UTF-16LE.
+local function _first_file_url(blob)
+  local url = blob:match("file://[^%z%s\"'<>]+")
+  if url then return url end
+  return _utf16_file_url(blob)
+end
+
 -- Reaktor/Kontakt/etc. store the loaded ensemble as a "file://.../Name.ext"
 -- string inside the preset blob; treat the last path component (minus the
 -- extension) as the preset/ensemble name.
@@ -42,6 +70,11 @@ local function _scan_chunk_for_name(blob)
   end
   for url in blob:gmatch("file://[^%z%s\"'<>]+") do
     local n = base_of(url)
+    if n and n ~= "" then return n end
+  end
+  local utf16 = _utf16_file_url(blob)
+  if utf16 then
+    local n = base_of(utf16)
     if n and n ~= "" then return n end
   end
   return nil
@@ -75,14 +108,68 @@ end
 -- an external ensemble file, as opposed to a plugin with a flat factory bank.
 function up_preset.find_ensemble_url(data)
   if type(data) ~= "string" or data == "" then return nil end
-  local url = data:match("file://[^%z%s\"'<>]+")
+  local url = _first_file_url(data)
   if url then return url end
   if data:find("\0") or data:find("[^A-Za-z0-9+/=%s]") then return nil end
   local ok, dec = pcall(_b64decode, data)
   if ok and dec and dec ~= "" then
-    return dec:match("file://[^%z%s\"'<>]+")
+    return _first_file_url(dec)
   end
   return nil
+end
+
+-- The raw plugin binary bytes behind Renoise's `active_preset_data`. The value is
+-- normally the <FilterDevicePreset> XML wrapper whose <ParameterChunk> CDATA is
+-- the base64 of the binary, but the live API (and some callers) hand back the raw
+-- chunk directly. Both are accepted, so callers can search the real state without
+-- caring which form they hold.
+function up_preset.chunk_bytes(data)
+  if type(data) ~= "string" or data == "" then return "" end
+  local cdata = data:match("<ParameterChunk[^>]*>%s*<!%[CDATA%[(.-)%]%]>")
+  if cdata then
+    local decoded = up_preset.decode_chunk(cdata)
+    if decoded and decoded ~= "" then return decoded end
+  end
+  return data
+end
+
+-- Pure-Lua base64 encoder, used to put a recovered plugin binary back into the
+-- <ParameterChunk><![CDATA[...]]></ParameterChunk> of Renoise's active_preset_data
+-- XML wrapper.
+local _b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local function _b64encode(data)
+  local out = {}
+  for i = 1, #data, 3 do
+    local a = data:byte(i)
+    local b = data:byte(i + 1)
+    local c = data:byte(i + 2)
+    local n = a * 65536 + (b or 0) * 256 + (c or 0)
+    out[#out + 1] = _b64chars:sub(math.floor(n / 262144) % 64 + 1, math.floor(n / 262144) % 64 + 1)
+    out[#out + 1] = _b64chars:sub(math.floor(n / 4096) % 64 + 1, math.floor(n / 4096) % 64 + 1)
+    out[#out + 1] = b and _b64chars:sub(math.floor(n / 64) % 64 + 1, math.floor(n / 64) % 64 + 1) or "="
+    out[#out + 1] = c and _b64chars:sub(n % 64 + 1, n % 64 + 1) or "="
+  end
+  return table.concat(out)
+end
+
+-- Decode a plugin state chunk to the raw bytes Renoise assigns to
+-- `active_preset_data`. Song.xml stores it base64-encoded in <ParameterChunk>
+-- CDATA; the live API hands back the raw binary. Accepts either.
+function up_preset.decode_chunk(data)
+  if type(data) ~= "string" or data == "" then return nil end
+  if data:find("\0") or data:find("[^A-Za-z0-9+/=%s]") then
+    return data
+  end
+  local ok, dec = pcall(_b64decode, data)
+  if ok and dec and dec ~= "" then return dec end
+  return data
+end
+
+-- Base64-encode a raw plugin state chunk for injection into the
+-- <ParameterChunk><![CDATA[...]]></ParameterChunk> of active_preset_data.
+function up_preset.encode_chunk(data)
+  if type(data) ~= "string" or data == "" then return nil end
+  return _b64encode(data)
 end
 
 function up_preset.extract_name(device)

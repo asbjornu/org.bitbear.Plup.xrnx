@@ -167,17 +167,18 @@ end
 
 section("up_swap.swap_instrument resolves the patch when the bank loads in stages")
 do
-  -- A healthy Reaktor reports its active preset name ("Dark Dreams") and, from the
-  -- chunk, the ensemble name ("Razor"). The candidate order can put the patch first
-  -- even though the ensemble must be selected before the patch exists in the bank;
-  -- a second pass must therefore re-resolve the patch.
+  -- A missing Reaktor reports the ensemble ("Razor") and the user's patch as the
+  -- instrument name ("Dark Dreams 1"). The candidate order puts the ensemble first;
+  -- selecting it replaces the bank with the ensemble's snapshots, and a second pass
+  -- must then resolve the patch (whose bank name lacks the " 1" suffix).
   local snapshots = {}
   for i = 1, 60 do snapshots[i] = "Snap " .. i end
   snapshots[48] = "Dark Dreams"
   local state = { active_preset = 0 }
-  local new_dev = setmetatable({ is_active = true, active_preset_data = "", parameters = {} }, {
+  local new_dev = setmetatable({ is_active = true, parameters = {} }, {
     __index = function(_, key)
       if key == "active_preset" then return state.active_preset end
+      if key == "active_preset_data" then return "" end
       if key == "presets" then
         if state.active_preset == 0 then return { "Razor.rkplr" } end
         return snapshots
@@ -189,17 +190,13 @@ do
       else rawset(_, key, value) end
     end,
   })
-  local pp = { plugin_loaded = true,
-    plugin_device = { device_path = "/P/Reaktor5.au", name = "AU: Native Instruments: Reaktor5",
-      active_preset = 0, presets = {},
-      active_preset_data = "\0file://localhost/Users/Shared/Razor/Razor.rkplr\0", parameters = {} },
+  local pp = { plugin_loaded = false, plugin_device = nil,
     load_plugin = function(self, _p) self.plugin_device = new_dev; return true end }
   local song = { instruments = { { plugin_properties = pp } }, automation = function() return nil end }
-  local rec = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
-    instrument_name = "Dark Dreams 1", active_preset_name = "Dark Dreams",
-    analysis = analyze("AU: Native Instruments: Reaktor5", nil, "AU"), device_path = "/P/Reaktor5.au" }
-  local candidate = analyze("VST3: Native Instruments: Reaktor 6", "/P/Reaktor6.vst3", "VST3")
-  candidate.path = "/P/Reaktor6.vst3"
+  local rec = { kind = "instrument", instrument_index = 1, broken = true, plugin_loaded = false,
+    instrument_name = "Dark Dreams 1", active_preset_name = "Razor",
+    analysis = { protocol = "AU" }, device_path = nil }
+  local candidate = { path = "/P/Reaktor6.vst3", protocol = "VST3" }
   local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
   check(ok and res and res.status == "upgraded-name-matched-preset",
     "the patch is found after the ensemble populates the bank")
@@ -211,6 +208,9 @@ do
   -- Reaktor 5 and 6 share the program bank: program 48 is the same snapshot. When
   -- the snapshot's name can't be matched (it lives only in the old opaque chunk)
   -- the recorded program number is restored instead, after the ensemble is loaded.
+  -- No donor is used here, so the name/program fallback path is exercised.
+  local real_chunk_for = up_donor.chunk_for
+  up_donor.chunk_for = function() return nil end
   local snapshots = {}
   for i = 1, 60 do snapshots[i] = "Snap " .. i end
   local state = { active_preset = 0 }
@@ -241,6 +241,7 @@ do
   check(ok and res and res.status == "upgraded-name-matched-preset",
     "the ensemble is loaded and the program number restored")
   check(state.active_preset == 48, "the recorded program number (48) is restored")
+  up_donor.chunk_for = real_chunk_for
 end
 
 section("up_swap.swap_instrument does not carry a program number to a flat bank")
@@ -280,6 +281,141 @@ do
   check(ok and res and res.status == "upgraded-name-matched-preset",
     "the suffix-less snapshot name is matched")
   check(new_dev.active_preset == 1, "the Dark Dreams snapshot is selected")
+end
+
+section("up_swap.swap_instrument injects a recovered chunk into the XML wrapper")
+do
+  -- active_preset_data is Renoise's XML wrapper; a chunk recovered from Song.xml
+  -- is the raw plugin binary, so it must be base64-injected into the wrapper's
+  -- <ParameterChunk> rather than assigned directly (which Renoise rejects). No
+  -- donor, so the recovered chunk itself is what gets injected.
+  local real_chunk_for = up_donor.chunk_for
+  up_donor.chunk_for = function() return nil end
+  local raw = "\0\0file://localhost/Users/Shared/Razor/Razor.rkplr\0\0"
+  local wrapper = '<?xml version="1.0" encoding="UTF-8"?>\n'
+    .. '<FilterDevicePreset doc_version="14"><DeviceSlot type="AudioPluginDevice">'
+    .. '<PluginType>VST3</PluginType><PluginIdentifier>5653544E695236</PluginIdentifier>'
+    .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local new_dev = { is_active = true, active_preset_data = wrapper, presets = {}, parameters = {} }
+  local pp = { plugin_loaded = false, plugin_device = nil,
+    load_plugin = function(self, _p) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, automation = function() return nil end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = true, plugin_loaded = false,
+    instrument_name = "Dark Dreams 1", active_preset_name = "Razor", active_preset = 48,
+    active_preset_data = raw, ensemble_preset = true,
+    analysis = analyze("AU: Native Instruments: Reaktor5", nil, "AU"), device_path = nil }
+  local candidate = analyze("VST3: Native Instruments: Reaktor 6", "/P/Reaktor6.vst3", "VST3")
+  candidate.path = "/P/Reaktor6.vst3"
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-with-parameters",
+    "the recovered chunk is injected and counts as a transfer")
+  check(new_dev.active_preset_data:find("<ParameterChunk><![CDATA[", 1, true) ~= nil
+    and #new_dev.active_preset_data > #wrapper,
+    "the raw chunk is base64-injected into the wrapper's ParameterChunk")
+  check(new_dev.active_preset_data:find(up_preset.encode_chunk(raw), 1, true) ~= nil,
+    "the injected base64 is the recovered chunk")
+  up_donor.chunk_for = real_chunk_for
+end
+
+section("up_swap detects a loaded Reaktor device from its XML wrapper")
+do
+  -- A loaded Reaktor device exposes active_preset_data as Renoise's XML wrapper,
+  -- whose base64 <ParameterChunk> hides the ensemble reference. Searching the
+  -- wrapper text for "file://" never matches, so the container must be detected
+  -- from the decoded chunk (and the donor path taken) -- otherwise a loaded
+  -- Reaktor 5 -> 6 upgrade silently falls back to the flat-plugin path.
+  local function utf16(s)
+    local out = {}
+    for i = 1, #s do out[#out + 1] = s:sub(i, i) .. "\0" end
+    return table.concat(out)
+  end
+  local ensemble = "\1\2\3" .. utf16("file://Razor.rkplr") .. "\0\0"
+  local function wrapper(chunk)
+    return '<?xml version="1.0"?><FilterDevicePreset><DeviceSlot><ParameterChunk><![CDATA['
+      .. up_preset.encode_chunk(chunk) .. ']]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  end
+  local donor_raw = "\0\0file://Razor.rkplr\0\0"
+  local real_chunk_for = up_donor.chunk_for
+  local donor_calls = {}
+  up_donor.chunk_for = function(family, name)
+    donor_calls[#donor_calls + 1] = { family = family, name = name }
+    return donor_raw
+  end
+  local old_dev = { is_active = true, active_preset_data = wrapper(ensemble), parameters = {},
+    active_preset = 48, presets = {} }
+  local new_dev = { is_active = true, active_preset_data = wrapper(ensemble), parameters = {},
+    presets = {} }
+  local pp = { plugin_loaded = true, plugin_device = old_dev,
+    load_plugin = function(self, _p) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, automation = function() return nil end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
+    instrument_name = "Dark Dreams 1", active_preset_name = "Dark Dreams", active_preset = 48,
+    analysis = analyze("VST: Native Instruments: Reaktor5", nil, "VST"), device_path = "/P/Reaktor5.vst" }
+  local candidate = analyze("VST3: Native Instruments: Reaktor 6", "/P/Reaktor6.vst3", "VST3")
+  candidate.path = "/P/Reaktor6.vst3"
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-with-parameters",
+    "the donor chunk is injected for a loaded Reaktor container")
+  check(#donor_calls == 1 and donor_calls[1].name == "Razor",
+    "the donor lookup uses the chunk's ensemble, not the active snapshot name")
+  up_donor.chunk_for = real_chunk_for
+end
+
+section("up_swap does not cross-format transplant a non-Reaktor container")
+do
+  -- Kontakt is file-backed too, but its chunk is not portable across major
+  -- versions like Reaktor's, so a cross-format (VST -> VST3) upgrade must fall
+  -- back to the name/parameter path instead of injecting the incompatible chunk.
+  local function utf16(s)
+    local out = {}
+    for i = 1, #s do out[#out + 1] = s:sub(i, i) .. "\0" end
+    return table.concat(out)
+  end
+  local raw = "\1\2" .. utf16("file://Legato.nki") .. "\0\0"
+  local function wrapper(chunk)
+    return '<?xml version="1.0"?><FilterDevicePreset><DeviceSlot><ParameterChunk><![CDATA['
+      .. up_preset.encode_chunk(chunk) .. ']]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  end
+  local new_dev = { is_active = true, active_preset_data = wrapper(raw), parameters = {},
+    presets = {}, active_preset = 0 }
+  local old_dev = { is_active = true, active_preset_data = wrapper(raw), parameters = {},
+    presets = {} }
+  local pp = { plugin_loaded = true, plugin_device = old_dev,
+    load_plugin = function(self, _p) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, automation = function() return nil end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
+    instrument_name = "Legato", analysis = analyze("VST: Native Instruments: Kontakt6", nil, "VST"),
+    device_path = "/P/Kontakt6.vst" }
+  local candidate = analyze("VST3: Native Instruments: Kontakt 7", "/P/Kontakt7.vst3", "VST3")
+  candidate.path = "/P/Kontakt7.vst3"
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res and res.status ~= "upgraded-with-parameters",
+    "a non-Reaktor container is not chunk-transplanted across formats")
+end
+
+section("up_swap does not use the Reaktor path for a cross-family swap")
+do
+  -- A Kontakt -> Reaktor upgrade is not same-family, so it must not inject the
+  -- Reaktor donor chunk or drive the Reaktor bank scan on an unrelated plugin.
+  local real_chunk_for = up_donor.chunk_for
+  local donor_calls = 0
+  up_donor.chunk_for = function() donor_calls = donor_calls + 1; return "\1\2donor" end
+  local new_dev = { is_active = true, active_preset_data = "", parameters = {},
+    presets = { "Reaktor Init" }, active_preset = 0 }
+  local old_dev = { is_active = true, active_preset_data = "", parameters = {}, presets = {} }
+  local pp = { plugin_loaded = true, plugin_device = old_dev,
+    load_plugin = function(self, _p) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, automation = function() return nil end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
+    instrument_name = "Legato", ensemble_preset = true, active_preset = 3,
+    analysis = analyze("VST: Native Instruments: Kontakt6", nil, "VST"),
+    device_path = "/P/Kontakt6.vst" }
+  local candidate = analyze("VST3: Native Instruments: Reaktor 6", "/P/Reaktor6.vst3", "VST3")
+  candidate.path = "/P/Reaktor6.vst3"
+  local ok = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok, "the cross-family swap completes")
+  check(donor_calls == 0, "the Reaktor donor is not consulted for a cross-family swap")
+  up_donor.chunk_for = real_chunk_for
 end
 
 section("coverage: up_swap.swap_track_device upgrades a track plugin")

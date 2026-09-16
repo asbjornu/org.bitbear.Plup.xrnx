@@ -119,10 +119,12 @@ function up_song_xml.parse_instruments(xml)
       -- indented ParameterChunks are handled by the tree parser for free.
       local preset_name
       local ensemble_url
+      local preset_data
       local cdata = up_xml.descendant_cdata(block, "ParameterChunk")
       if cdata then
         preset_name = up_preset.extract_name({ active_preset_data = cdata })
         ensemble_url = up_preset.find_ensemble_url(cdata)
+        preset_data = up_preset.decode_chunk(cdata)
       end
       -- Renoise records the active plugin program number. Reaktor keeps the same
       -- program bank across major versions (Razor's snapshots), so carrying the
@@ -138,6 +140,7 @@ function up_song_xml.parse_instruments(xml)
         short_display_name = sdisp or disp,
         preset_name = preset_name,
         ensemble_url = ensemble_url,
+        preset_data = preset_data,
         active_program = active_program,
       }
       out[idx] = entry
