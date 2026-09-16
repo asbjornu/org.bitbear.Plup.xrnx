@@ -41,8 +41,15 @@ them.
   maximum 50 characters, repeat it in the body if truncation is necessary.
   Wrap the body at 72 characters.
 - Commit with signature (`git commit -S`). `gpg` is installed with Homebrew.
-- Keep `luacheck` clean on `lib/*.lua` and `tests/run.lua` (LibDeflate is
-  vendored + excluded).
+- Keep `luacheck` clean with the **same command as CI**, which lints every
+  file (not just `lib/*.lua tests/run.lua`): `luacheck . --exclude-files
+  '.luarocks' --exclude-files 'lib/LibDeflate.lua' --exclude-files
+  'lib/slaxml.lua'`.
+- When a spec reads or monkey-patches a global, declare it in `.luacheckrc`
+  under `files["tests/**"]`: modules that are only read go in
+  `read_globals`; modules whose fields a spec assigns (`up_zip`,
+  `up_song_xml`, `up_donor`, `up_midi`) plus `renoise` go in `globals`
+  (read-write), or CI fails with "setting read-only field".
 
 ## Layout
 
