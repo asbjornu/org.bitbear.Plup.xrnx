@@ -1,6 +1,11 @@
 *.xrnx
 luacov.stats.out
 coverage.lcov
+# Runtime OpenCode configuration written into the workspace by the gh-aw PR
+# fixer. It carries the MCP gateway bearer token, so it must never be staged by
+# the agent's `git add -A` or pushed to a pull request.
+opencode.jsonc
+.opencode/
 # NOTE: lib/slaxml.lua is vendored into the repo (MIT, see the file header) so
 # the build no longer depends on LuaRocks' slaxml package, whose rockspec points
 # at a git tag that no longer exists upstream.
