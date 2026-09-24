@@ -41,6 +41,10 @@ them.
   maximum 50 characters, repeat it in the body if truncation is necessary.
   Wrap the body at 72 characters.
 - Commit with signature (`git commit -S`). `gpg` is installed with Homebrew.
+- When addressing PR review comments, reply on each thread and then resolve
+  the thread and hide/minimize the addressed comment (GitHub
+  `resolveReviewThread` and `minimizeComment`). Leave threads you did not
+  address open for a human.
 - Keep `luacheck` clean with the **same command as CI**, which lints every
   file (not just `lib/*.lua tests/run.lua`): `luacheck . --exclude-files
   '.luarocks' --exclude-files 'lib/LibDeflate.lua' --exclude-files
