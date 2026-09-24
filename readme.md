@@ -44,6 +44,29 @@ them while trying to preserve the previous preset/state.
         device, and instrument plugins rebuild it from the captured point data.
         All of this is best-effort and fully `pcall`-guarded, so a failure
         never aborts the upgrade.
+  - **Reaktor ensembles use a bundled donor + a MIDI loopback.** Reaktor keeps
+    its whole patch (ensemble + snapshot) inside the opaque state chunk and
+    exposes no usable program bank until that state is loaded, and Reaktor 6
+    rejects Reaktor 5's chunk. A known-good Reaktor 6 Razor state is therefore
+    bundled into the tool (`lib/up_donor_data.lua`, base64) and injected into
+    each upgraded Reaktor instance, but only when the instance is actually
+    loaded with the Razor ensemble; an instance holding another ensemble keeps
+    its own state instead of being silently rewritten to Razor. That loads the
+    ensemble, but Renoise's plugin API can only address the plugin's **first**
+    snapshot bank, so the per-instance snapshot is selected over a MIDI loopback
+    (see *Reaktor 6 MIDI setup* below): Plup sends Bank Select CCs to move
+    Reaktor's bank and lets Renoise choose the program, confirming the hit by the
+    snapshot name embedded in the serialized state. Without the loopback, Reaktor
+    instances still get the ensemble but only first-bank snapshots resolve.
+  - **Reaktor 6 MIDI setup (one-time).** Bank Select is unreachable from the
+    plugin API, so Plup needs a MIDI loopback port:
+    1. macOS: open **Audio MIDI Setup → Window → Show MIDI Studio**,
+       double-click **IAC Driver** and tick **Device is online** (this creates
+       `IAC Driver (Bus 1)`; any loopback port whose name contains `IAC` works).
+    2. Renoise: **Edit → Preferences → MIDI**, enable that bus in the **Inputs**
+       list.
+    3. Run the upgrade. Plup points each upgraded Reaktor instrument's MIDI
+       input at the loopback port automatically; nothing else needs wiring.
 4. **Per-row UI + live refresh.** Shows a grid with the current plugin, a
    "Replace with" dropdown of candidates (auto-selecting the best upgrade),
    and a result column. The dialog watches the song and re-scans (reusing

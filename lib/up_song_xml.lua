@@ -17,7 +17,7 @@ local up_preset = require("up_preset")
 -- default state unless the user's preset name (the instrument name) resolves in
 -- the installed plugin's own bank.
 
-local _cache = { file = nil, data = nil }
+local _cache = { file = nil, data = nil, parsed = nil }
 
 -- up_xml.descendant_text returns "" (truthy) for an empty or self-closing element,
 -- e.g. <PluginShortDisplayName/>. Left as-is that empty string wins every
@@ -70,6 +70,9 @@ local function read_song_xml(song)
   if ok_z and xml and xml ~= "" then
     _cache.file = path
     _cache.data = xml
+    -- The parsed tree belongs to the previous raw XML, so drop it here; recover()
+    -- rebuilds and caches it lazily.
+    _cache.parsed = nil
     return xml
   end
   return nil
@@ -115,10 +118,19 @@ function up_song_xml.parse_instruments(xml)
       -- this machine (so the live API exposes no preset name). Attribute-bearing and
       -- indented ParameterChunks are handled by the tree parser for free.
       local preset_name
+      local ensemble_url
+      local preset_data
       local cdata = up_xml.descendant_cdata(block, "ParameterChunk")
       if cdata then
         preset_name = up_preset.extract_name({ active_preset_data = cdata })
+        ensemble_url = up_preset.find_ensemble_url(cdata)
+        preset_data = up_preset.decode_chunk(cdata)
       end
+      -- Renoise records the active plugin program number. Reaktor keeps the same
+      -- program bank across major versions (Razor's snapshots), so carrying the
+      -- number over lets the replacement select the same patch even when the
+      -- snapshot name can't be recovered (e.g. it lives only in the opaque chunk).
+      local active_program = tonumber(up_xml.descendant_text(block, "ActiveProgram"))
       local entry = {
         index = idx,
         instrument_name = iname,
@@ -127,6 +139,9 @@ function up_song_xml.parse_instruments(xml)
         display_name = disp or sdisp,
         short_display_name = sdisp or disp,
         preset_name = preset_name,
+        ensemble_url = ensemble_url,
+        preset_data = preset_data,
+        active_program = active_program,
       }
       out[idx] = entry
       if iname then out[iname] = entry end
@@ -146,12 +161,19 @@ function up_song_xml.recover(song)
   if not xml then
     return {}
   end
-  return up_song_xml.parse_instruments(xml)
+  -- Parsing the whole Song.xml tree is the expensive part, and recover() is called
+  -- repeatedly for the same song (e.g. per-row reinspection after an upgrade, while
+  -- the file on disk is unchanged). Cache the parsed result so it runs once per song.
+  if not _cache.parsed then
+    _cache.parsed = up_song_xml.parse_instruments(xml)
+  end
+  return _cache.parsed
 end
 
 function up_song_xml.invalidate_cache()
   _cache.file = nil
   _cache.data = nil
+  _cache.parsed = nil
 end
 
 return up_song_xml
