@@ -63,7 +63,7 @@ do
     -- Product modules, exposed as globals so the spec files can use them.
     up_plugin_analysis = true, up_matching = true, up_preset = true, up_song_xml = true,
     up_xml = true, up_inventory = true, up_core = true, up_zip = true,
-    up_swap = true, up_scheduler = true, up_ui = true,
+    up_swap = true, up_scheduler = true, up_ui = true, up_donor = true, up_midi = true,
     -- Shared test helpers, exposed as globals.
     check = true, section = true, analyze = true, candidates_for = true,
     failures = true, fixture = true, observable = true,
@@ -186,6 +186,8 @@ _G.up_inventory = require("up_inventory")
 _G.up_core      = require("up_core") -- loaded so its module is counted in coverage
 _G.up_zip       = require("up_zip")
 _G.up_swap      = require("up_swap")
+_G.up_donor     = require("up_donor")
+_G.up_midi      = require("up_midi")
 _G.up_scheduler = require("up_scheduler") -- pure logic; safe to load headlessly
 _G.up_ui = require("up_ui")
 
@@ -221,7 +223,7 @@ _G.section("compile-check all sources")
 local sources = { "main.lua", "lib/up_core.lua", "lib/up_inventory.lua",
   "lib/up_matching.lua", "lib/up_preset.lua", "lib/up_scheduler.lua",
   "lib/up_song_xml.lua", "lib/up_swap.lua", "lib/up_ui.lua", "lib/up_plugin_analysis.lua",
-  "lib/up_zip.lua" }
+  "lib/up_donor.lua", "lib/up_donor_data.lua", "lib/up_midi.lua", "lib/up_zip.lua" }
 for _, s in ipairs(sources) do
   local f, err = loadfile(root .. "/" .. s)
   _G.check(f ~= nil, "compiles: " .. s .. (err and (" (" .. err .. ")") or ""))
@@ -236,6 +238,8 @@ require("spec.matching_spec")
 require("spec.song_xml_spec")
 require("spec.inventory_spec")
 require("spec.swap_spec")
+require("spec.donor_spec")
+require("spec.midi_spec")
 require("spec.scheduler_spec")
 require("spec.zip_spec")
 require("spec.core_spec")

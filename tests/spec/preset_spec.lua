@@ -71,6 +71,27 @@ do
     "a file:// URL without an extension yields no name")
 end
 
+section("up_preset reads Reaktor's UTF-16LE ensemble reference")
+do
+  -- A real Reaktor state chunk stores the ensemble path UTF-16LE, so the ASCII
+  -- "file://" pattern never matches it. The chunk below is a small stand-in for
+  -- the bundled donor's head.
+  local function utf16(s)
+    local out = {}
+    for i = 1, #s do out[#out + 1] = s:sub(i, i) .. "\0" end
+    return table.concat(out)
+  end
+  local blob = "\1\2\3\4" .. utf16("file://Razor.rkplr") .. "\0\0\5\6"
+  check(up_preset.find_ensemble_url(blob) == "file://Razor.rkplr",
+    "find_ensemble_url decodes the UTF-16LE file:// URL")
+  check(up_preset._extract_chunk_name(blob) == "Razor",
+    "_extract_chunk_name returns the UTF-16LE ensemble name")
+  -- A UTF-16 URL without an extension yields no name.
+  local no_ext = "\1" .. utf16("file://NoExtension") .. "\0\0"
+  check(up_preset._extract_chunk_name(no_ext) == nil,
+    "UTF-16 file:// URL without an extension yields no name")
+end
+
 section("coverage: up_preset.extract_name edge cases")
 do
   -- active_preset index out of range yields no active_preset_name.
@@ -84,4 +105,16 @@ do
   -- A raw binary blob with no file:// URL is rejected before decoding.
   check(up_preset.extract_name({ active_preset_data = "\000\000\001\002blob\255" }) == nil,
     "binary blob without file:// URL -> nil")
+end
+
+section("up_preset.chunk_bytes unwraps the XML wrapper")
+do
+  local raw = "\0\1\2\3file-state"
+  local wrapper = '<?xml version="1.0"?><FilterDevicePreset><DeviceSlot><ParameterChunk><![CDATA['
+    .. up_preset.encode_chunk(raw) .. ']]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  check(up_preset.chunk_bytes(wrapper) == raw,
+    "the base64 <ParameterChunk> CDATA is decoded to the raw bytes")
+  check(up_preset.chunk_bytes(raw) == raw,
+    "a raw chunk (no wrapper) is returned unchanged")
+  check(up_preset.chunk_bytes("") == "", "an empty value yields empty bytes")
 end

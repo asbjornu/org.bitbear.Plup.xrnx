@@ -5,6 +5,7 @@ local up_inventory = require("up_inventory")
 local up_matching = require("up_matching")
 local up_preset = require("up_preset")
 local up_result_display = require("up_result_display")
+local up_midi = require("up_midi")
 
 local PLUGIN_ROWS_VISIBLE = 12
 local LIST_HEIGHT = 340
@@ -815,18 +816,52 @@ function up_ui.do_upgrade()
     end
   end
 
-  -- Disable all row controls up front; re-enabled when the run finishes.
-  if up_ui._row_views then
-    for _, row_view in ipairs(up_ui._row_views) do
-      if row_view.popup then row_view.popup.active = false end
-    end
-  end
-
   if #selected == 0 then
     if up_ui._upgrade_btn then up_ui._upgrade_btn.active = true end
     if up_ui._status_text then up_ui._status_text.text = "No replacements selected." end
     up_ui.recompute_visible()
     return
+  end
+
+  -- A Reaktor upgrade needs the MIDI loopback to address snapshot banks, which
+  -- the plugin API cannot do. Offer the one-time setup before running rather than
+  -- silently finishing with only first-bank snapshots. Only Reaktor uses the
+  -- route, so other file-backed containers (Kontakt) are not gated.
+  local needs_loopback = false
+  for _, s in ipairs(selected) do
+    local record = s.result.entry
+    local analysis = record and record.analysis
+    local base = analysis and up_plugin_analysis.family_base(analysis.base or analysis.product or "") or ""
+    if record and record.ensemble_preset and base:find("reaktor", 1, true) then
+      needs_loopback = true
+      break
+    end
+  end
+  if needs_loopback and not up_midi.has_loopback() then
+    -- The row controls are untouched until here, so cancelling leaves the user
+    -- free to change the selection and retry.
+    if up_ui.show_reaktor_midi_help() ~= "configured" then
+      if up_ui._upgrade_btn then up_ui._upgrade_btn.active = true end
+      return
+    end
+    -- Re-check availability instead of recursing: confirming the prompt does not
+    -- mean the bus was actually enabled, and a recursive retry would loop (and
+    -- grow the stack) when it was not.
+    if not up_midi.has_loopback() then
+      if up_ui._upgrade_btn then up_ui._upgrade_btn.active = true end
+      if up_ui._status_text then
+        up_ui._status_text.text = "No MIDI loopback port found; Reaktor snapshots not selected."
+      end
+      return
+    end
+  end
+
+  -- Disable all row controls for the duration of the run; re-enabled when it
+  -- finishes (or when the run is stopped).
+  if up_ui._row_views then
+    for _, row_view in ipairs(up_ui._row_views) do
+      if row_view.popup then row_view.popup.active = false end
+    end
   end
 
   up_ui.stop_scan()
@@ -923,6 +958,40 @@ function up_ui.do_upgrade()
     function() return up_ui._closed end)
 end
 
+-- Explain the one-time loopback setup needed to select Reaktor snapshot banks.
+-- Returns "configured" when the user confirmed the port is set up (so the caller
+-- can retry), or nil when the dialog was cancelled/closed.
+function up_ui.show_reaktor_midi_help()
+  local view_builder = renoise.ViewBuilder()
+  -- multiline_text auto-wraps paragraphs to the view width (a plain text view is
+  -- single-line and has no wrap property).
+  local text = table.concat({
+    "Upgrading from Reaktor 5 to Reaktor 6 requires a MIDI loopback device, "
+      .. "because Renoise's plugin API cannot select a Reaktor snapshot bank "
+      .. "directly. Plup therefore sends Bank Select over the loopback to switch "
+      .. "each instance's snapshot bank, and confirms the chosen snapshot by the "
+      .. "patch name stored in the plugin state.",
+    "",
+    "1. Open Audio MIDI Setup, choose Window > Show MIDI Studio, then "
+      .. "double-click the IAC Driver and tick \"Device is online\".",
+    "2. In Renoise, open Edit > Preferences > MIDI and enable that bus in the "
+      .. "Inputs list.",
+    "3. Click \"Run upgrade\" below and run the upgrade again. Plup points each "
+      .. "upgraded Reaktor instrument's MIDI input at the loopback port "
+      .. "automatically; nothing else needs wiring.",
+  }, "\n")
+  local content = view_builder:column{
+    margin = 12,
+    view_builder:multiline_text{ text = text, size = { width = 620, height = 160 } },
+  }
+  local answer = renoise.app():show_custom_prompt("Reaktor 6 MIDI setup", content,
+    { "Run upgrade", "Cancel" })
+  if answer == "Run upgrade" then
+    return "configured"
+  end
+  return nil
+end
+
 function up_ui.show_dialog()
   local song = renoise.song()
   if not song then
@@ -987,6 +1056,12 @@ function up_ui.show_dialog()
     active = false,
     notifier = function() up_ui.do_upgrade() end,
   }
+  -- Only offered while the Reaktor bank-select loopback is unavailable.
+  local midi_setup_btn = view_builder:button{
+    text = "Reaktor MIDI setup...",
+    visible = not up_midi.ready(),
+    notifier = function() up_ui.show_reaktor_midi_help() end,
+  }
 
   local list_col = view_builder:column{ width = 880, list_box }
   local content = view_builder:column{
@@ -1002,7 +1077,11 @@ function up_ui.show_dialog()
       mode = "justify",
       width = "100%",
       status_text,
-      upgrade_btn,
+      view_builder:row{
+        spacing = 6,
+        midi_setup_btn,
+        upgrade_btn,
+      },
     },
   }
 
