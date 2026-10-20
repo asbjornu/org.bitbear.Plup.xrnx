@@ -149,9 +149,10 @@ Security notes:
   OpenCode engine (the upstream Goose adapter has the same property). The token
   only unlocks the gateway, which enforces the same tool guard policies. The
   staging step appends `opencode.jsonc` and `.opencode/` to the checkout-local
-  `.git/info/exclude` (which covers untracked files) and then unstages those
-  paths, so the file cannot leak through `git add -A` even when the target
-  branch already tracks it.
+  `.git/info/exclude` (which covers untracked files), unstages those paths, and
+  refuses to stage at all if either is (or contains) a symlink, so the file
+  cannot leak through `git add -A` even when the target branch already tracks
+  it or tracks it as a symlink.
 - Same-repo guard: the pre-agent `steps:` guard rejects a dispatch whose
   `aw_context` does not name a same-repository pull request, so the agent never
   activates against untrusted fork code with repository secrets available.
@@ -240,6 +241,13 @@ raised, using the OpenCode CLI.
        grep -qxF "$p" .git/info/exclude 2>/dev/null \
          || printf '%s\n' "$p" >> .git/info/exclude
      done
+     # A PR can commit opencode.jsonc or .opencode as a symlink, so the adapter
+     # writes the bearer token through it into a tracked file. Refuse to stage
+     # if either path is (or contains) a symlink.
+     if [ -n "$(find opencode.jsonc .opencode -type l -print -quit 2>/dev/null)" ]; then
+       echo "refusing to stage: runtime config path is a symlink" >&2
+       exit 1
+     fi
      git add -A
      # A target branch may already track the runtime config; .git/info/exclude
      # covers only untracked files, so unstage any change to these paths too.
