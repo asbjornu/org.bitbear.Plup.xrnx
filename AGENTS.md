@@ -18,16 +18,26 @@ them.
 
 ## Workflow
 
-- Work in the `renoise/3.5.4` Git worktree, which points to the path
-  within Renoise this tool is installed into.
-- **Before any edit or commit, verify the location.** Run
-  `git branch --show-current` and confirm it reports `renoise/3.5.4`, and
-  run `git rev-parse --show-toplevel` and confirm it equals the Renoise
+- **Do all work in a separate development worktree, never in the Renoise
+  install directory.** Create a worktree on a new branch from the branch you
+  are changing (e.g. `git worktree add ../org.bitbear.Plup.fix -b
+  fix/<name> renoise/3.5.4`), make the edits, run the suite and lint, and
+  commit there.
+- **`renoise/3.5.4` is the deployment mirror** checked out at the Renoise
   install path
   (`/Users/bitbear/Library/Preferences/Renoise/V3.5.4/Scripts/Tools/org.bitbear.Plup.xrnx`).
-  The `main` checkout under `/Users/bitbear/Dev/...` is the canonical repo
-  mirror only — never edit or commit there. If the session started in the
-  `main` checkout, stop and switch to the worktree before touching any file.
+  Treat it like a separate remote: synchronize it only after the development
+  worktree is green, by fast-forwarding it to the worktree's commit (e.g.
+  `git -C <install-path> merge --ff-only <sha>`) or pushing to it. Never
+  create, amend or edit commits in the install worktree itself.
+- **Before any edit or commit, verify the location.** Run
+  `git branch --show-current` and confirm it is the development branch (not
+  `main` and not `renoise/3.5.4`), and run `git rev-parse --show-toplevel`
+  and confirm it is the development worktree — it must **not** equal the
+  Renoise install path above.
+- The `main` checkout under `/Users/bitbear/Dev/...` is the canonical repo
+  mirror only — never edit files or create commits directly on `main`.
+  Update it only by fast-forwarding or merging the development branch.
 - Never change existing branches to point to a worktree. If you need a
   worktree, create a new branch.
 - `main` should always point to the canonical repository location, not the
