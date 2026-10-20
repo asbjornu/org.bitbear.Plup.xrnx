@@ -507,7 +507,7 @@ do
       analysis = analyze("VST3: Pro-MB", "/P/MB.vst3", proto or "VST3") }
   end
 
-  -- Same-format preset chunk transfer ("parameters").
+  -- Same-format preset chunk transfer ("parameters"): same product AND version.
   local new_dev_p = { is_active = true, active_preset_data = "", presets = {}, parameters = {} }
   local pp_p = { plugin_loaded = true,
     plugin_device = { device_path = "/P/MB.vst3", name = "VST3: Pro-MB",
@@ -516,7 +516,7 @@ do
   local song_p = { instruments = { { plugin_properties = pp_p } }, tracks = {},
     automation = function() return { is_automated = false } end }
   local okp, rp = pcall(function() return up_swap.swap_instrument(song_p, mkrec("VST3"),
-    { name = "Pro-MB 2", base = "pro mb", protocol = "VST3", path = "/P/MB2.vst3" }) end)
+    analyze("VST3: Pro-MB", "/P/MB-reinstall.vst3", "VST3")) end)
   check(okp and rp, "swap_instrument transfers same-format preset chunk")
   check(okp and rp and rp.status == "upgraded-with-parameters", "same-format chunk transfer -> parameters")
 
@@ -554,4 +554,168 @@ do
   local okb, rb = pcall(function() return up_swap.swap_instrument(song_bad, mkrec("VST3"),
     { name = "Pro-MB 2", protocol = "VST3", path = "/P/MB2.vst3" }) end)
   check(okb and rb and rb.status == "skipped-transfer-rejected", "swap_instrument reports rejected when load fails")
+end
+
+section("up_swap falls back to the parameter overlay for an incompatible same-format chunk")
+do
+  -- Kick -> Kick 2: both are VST (same protocol) but a different product
+  -- version, so the opaque chunk is incompatible. Writing it would be accepted
+  -- by the API and read back non-empty, silently losing the patch, so it must
+  -- be skipped and the captured parameters overlaid by name instead.
+  local new_dev = { is_active = true, active_preset_data = "",
+    presets = {}, parameters = { { name = "Mix", is_automatable = true } } }
+  local pp = { plugin_loaded = true,
+    plugin_device = { device_path = "/P/Kick.vst", name = "VST: Kick",
+      active_preset_data = "<PresetName>Kick Old</PresetName>",
+      parameters = { { name = "Mix", value = 0.25, is_automatable = true } } },
+    load_plugin = function(self, _p) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, tracks = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
+    instrument_name = "Old", device_path = "/P/Kick.vst", device_name = "VST: Kick",
+    analysis = analyze("VST: Kick", "/P/Kick.vst", "VST") }
+  local candidate = analyze("VST: Kick 2", "/P/Kick2.vst", "VST")
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res, "Kick -> Kick 2 swap succeeds")
+  check(ok and res and res.status == "upgraded-parameter-synth",
+    "incompatible same-format chunk falls back to the parameter overlay")
+  check(new_dev.active_preset_data == "", "old chunk is not written to the new plugin")
+  check(new_dev.parameters[1].value == 0.25, "shared parameter value is copied")
+
+  -- The track-device path shares the same gate.
+  local track_new_dev = { is_active = true, active_preset_data = "",
+    presets = {}, parameters = { { name = "Mix", is_automatable = true } } }
+  local track = {
+    devices = { [1] = {}, [2] = { is_active = true,
+      active_preset_data = "<PresetName>Kick Old</PresetName>",
+      parameters = { { name = "Mix", value = 0.25, is_automatable = true } } } },
+    insert_device_at = function(self, _path, idx)
+      table.insert(self.devices, idx, track_new_dev); return track_new_dev
+    end,
+    delete_device_at = function(self, idx) table.remove(self.devices, idx) end,
+  }
+  local track_song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local track_rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Kick.vst", device_name = "VST: Kick",
+    analysis = analyze("VST: Kick", "/P/Kick.vst", "VST") }
+  local track_res = up_swap.swap_track_device(track_song, track_rec, candidate)
+  check(track_res and track_res.status == "upgraded-parameter-synth",
+    "track Kick -> Kick 2 uses the parameter overlay")
+  check(track_new_dev.active_preset_data == "", "track old chunk is not written")
+  check(track_new_dev.parameters[1].value == 0.25, "track shared parameter value is copied")
+end
+
+section("up_swap rejects loose family matches and attached version bumps")
+do
+  -- Both pairs are offered by the matcher (loose token subset / family match)
+  -- but are NOT the same product at the same version, so the opaque chunk must
+  -- not be transplanted. Analyze both identities (as production does) instead
+  -- of hand-supplying candidate versions.
+  local function overlay_check(old_name, old_path, new_name, new_path, label)
+    local new_dev = { is_active = true, active_preset_data = "",
+      presets = {}, parameters = { { name = "Mix", is_automatable = true } } }
+    local pp = { plugin_loaded = true,
+      plugin_device = { device_path = old_path, name = old_name,
+        active_preset_data = "<PresetName>Old</PresetName>",
+        parameters = { { name = "Mix", value = 0.25, is_automatable = true } } },
+      load_plugin = function(self, _p) self.plugin_device = new_dev; return true end }
+    local song = { instruments = { { plugin_properties = pp } }, tracks = {},
+      automation = function() return { is_automated = false } end }
+    local rec = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
+      instrument_name = "Old", device_path = old_path, device_name = old_name,
+      analysis = analyze(old_name, old_path, "VST") }
+    local candidate = analyze(new_name, new_path, "VST")
+    local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+    check(ok and res and res.status == "upgraded-parameter-synth",
+      label .. " falls back to the parameter overlay")
+    check(new_dev.active_preset_data == "", label .. " does not write the old chunk")
+    check(new_dev.parameters[1].value == 0.25, label .. " copies a shared parameter")
+  end
+
+  -- "Massive X" is a distinct product, even though its tokens are a superset of
+  -- "Massive" (the old bidirectional subset check accepted this pair).
+  overlay_check("VST: Massive", "/P/Massive.vst", "VST: Massive X", "/P/MassiveX.vst",
+    "Massive -> Massive X")
+  -- The version is attached to the product word, so extract_version() returned
+  -- nil for both and the old check treated them as the same version.
+  overlay_check("VST: Kontakt6", "/P/Kontakt6.vst", "VST: Kontakt7", "/P/Kontakt7.vst",
+    "Kontakt6 -> Kontakt7")
+  -- Dots are normalized to spaces, so only the last number was compared.
+  overlay_check("VST: Pro-Q 2.0", "/P/ProQ2.vst", "VST: Pro-Q 3.0", "/P/ProQ3.vst",
+    "Pro-Q 2.0 -> Pro-Q 3.0")
+  -- The version is attached but not at the end of the name.
+  overlay_check("VST: Kontakt6 FX", "/P/Kontakt6FX.vst", "VST: Kontakt7 FX", "/P/Kontakt7FX.vst",
+    "Kontakt6 FX -> Kontakt7 FX")
+  -- A product qualifier ("One") must not be filtered away by the loose
+  -- matcher's stop list, which excludes "one".
+  overlay_check("VST: SynthMaster", "/P/SynthMaster.vst",
+    "VST: SynthMaster One", "/P/SynthMasterOne.vst",
+    "SynthMaster -> SynthMaster One")
+
+  -- A name made entirely of words filtered as non-product (vendor/generic
+  -- words) still has an identity, so a same-product replacement keeps its
+  -- compatible chunk instead of losing non-parameter state.
+  local new_dev_s = { is_active = true, active_preset_data = "", presets = {}, parameters = {} }
+  local pp_s = { plugin_loaded = true,
+    plugin_device = { device_path = "/P/TAL-Sampler.vst", name = "VST: TAL-Sampler",
+      active_preset_data = "<PresetName>Old</PresetName>", parameters = {} },
+    load_plugin = function(self, _p) self.plugin_device = new_dev_s; return true end }
+  local song_s = { instruments = { { plugin_properties = pp_s } }, tracks = {},
+    automation = function() return { is_automated = false } end }
+  local rec_s = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
+    instrument_name = "Old", device_path = "/P/TAL-Sampler.vst", device_name = "VST: TAL-Sampler",
+    analysis = analyze("VST: TAL-Sampler", "/P/TAL-Sampler.vst", "VST") }
+  local ok_s, res_s = pcall(function() return up_swap.swap_instrument(song_s, rec_s,
+    analyze("VST: TAL-Sampler", "/P/TAL-Sampler-reinstall.vst", "VST")) end)
+  check(ok_s and res_s and res_s.status == "upgraded-with-parameters",
+    "TAL-Sampler same-product reinstall transplants the chunk")
+  check(new_dev_s.active_preset_data ~= "", "TAL-Sampler chunk is written")
+end
+
+section("up_swap keeps vendor-prefixed products and bypass state")
+do
+  -- A manufacturer prefix on only one side must not lose a compatible chunk.
+  local new_dev = { is_active = true, active_preset_data = "", presets = {}, parameters = {} }
+  local pp = { plugin_loaded = true,
+    plugin_device = { device_path = "/P/u-he-ACE.vst", name = "VST: u-he ACE",
+      active_preset_data = "<PresetName>Old</PresetName>", parameters = {} },
+    load_plugin = function(self, _p) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, tracks = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
+    instrument_name = "Old", device_path = "/P/u-he-ACE.vst", device_name = "VST: u-he ACE",
+    analysis = analyze("VST: u-he ACE", "/P/u-he-ACE.vst", "VST") }
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec,
+    analyze("VST: ACE", "/P/ACE.vst", "VST")) end)
+  check(ok and res and res.status == "upgraded-with-parameters",
+    "u-he ACE -> ACE transplants the compatible chunk")
+  check(new_dev.active_preset_data ~= "", "u-he ACE -> ACE writes the chunk")
+
+  -- A matching factory preset can reactivate the new device during transfer;
+  -- the saved bypass flag must be restored afterwards.
+  local bypassed = setmetatable(
+    { active_preset_data = "", presets = { "Old" }, parameters = {}, is_active = true },
+    { __newindex = function(self, key, value)
+        if key == "active_preset" then
+          rawset(self, "active_preset", value)
+          rawset(self, "is_active", true)
+        else
+          rawset(self, key, value)
+        end
+      end })
+  local old_dev = { is_active = false, active_preset_data = "<PresetName>Old</PresetName>",
+    parameters = {} }
+  local pp_b = { plugin_loaded = true, plugin_device = old_dev,
+    load_plugin = function(self, _p) self.plugin_device = bypassed; return true end }
+  local song_b = { instruments = { { plugin_properties = pp_b } }, tracks = {},
+    automation = function() return { is_automated = false } end }
+  local rec_b = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
+    instrument_name = "Old", device_path = "/P/Kontakt6.vst", device_name = "VST: Kontakt6",
+    analysis = analyze("VST: Kontakt6", "/P/Kontakt6.vst", "VST") }
+  local ok_b, res_b = pcall(function() return up_swap.swap_instrument(song_b, rec_b,
+    analyze("VST: Kontakt7", "/P/Kontakt7.vst", "VST")) end)
+  check(ok_b and res_b and res_b.status == "upgraded-name-matched-preset",
+    "bypassed instrument loads the matching preset")
+  check(bypassed.is_active == false, "bypass state is restored after preset transfer")
 end

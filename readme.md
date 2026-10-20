@@ -147,15 +147,15 @@ them while trying to preserve the previous preset/state.
   found it is loaded from the replacement's own bank, but if nothing matches,
   state is generally not otherwise transferred for missing plugins.
 - **State transplant** is only attempted for the same product and version;
-  a same-format but incompatible chunk (e.g. `Kick` → `Kick 2`) is never
-  written, so shared parameters still carry over via the overlay above.
-  A VST2 ↔ VST3 upgrade of the same product wraps the engine state in the
-  replacement's `.vstpreset` container; when the plugin silently ignores
-  it (no captured parameter value survives) Plup falls back to the
-  preset/parameter overlay instead of reporting an exact transfer.
-  Verification accepts a direct transplant unless it raises an error or
-  yields an empty state; some plugins re-encode preset data, so always
-  sanity-check upgraded devices by ear.
+  a same-format but incompatible chunk (e.g. `Kick` → `Kick 2`, or
+  `SynthMaster` → `SynthMaster One`) is never written, so shared parameters
+  still carry over via the overlay above. A VST2 ↔ VST3 upgrade of the same
+  product wraps the engine state in the replacement's `.vstpreset` container;
+  when the plugin silently ignores it (no captured parameter value survives)
+  Plup falls back to the preset/parameter overlay instead of reporting an
+  exact transfer. Verification accepts a direct transplant unless it raises
+  an error or yields an empty state; some plugins re-encode preset data, so
+  always sanity-check upgraded devices by ear.
 - **Cross-format upgrades** carry state via captured parameter values
   matched by name; parameters the new plugin doesn't expose (or that aren't
   automatable for track effects) are dropped. Instrument parameters are
