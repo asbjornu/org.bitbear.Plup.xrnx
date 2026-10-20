@@ -22,6 +22,8 @@ jobs:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository
       && github.event.pull_request.user.login == (vars.PR_FIX_AUTHOR || 'asbjornu')
+      && github.event.pull_request.state == 'open'
+      && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - name: Check out the pull request branch
@@ -47,16 +49,29 @@ jobs:
           # rejection (a newer push moved it) from a push that never landed.
           orig_head=$(git rev-parse HEAD)
 
-          # Stateless: the set of commits to fold is defined solely by the
-          # fixup! prefix, from the branch merge-base. No marker or anchor
-          # comment is read or written, so there is no shared coordination
-          # state to race on. The fixer only targets commits strictly inside
-          # base..HEAD (pr-fix.md), so every fixup! has an in-range target.
-          # grep must consume the whole stream (not -q): with pipefail, -q would
-          # exit on the first match and SIGPIPE git log, faking a "no fixup!"
-          # no-op on a large range.
-          if ! git log --format=%s "$base..HEAD" | grep '^fixup! ' >/dev/null; then
-            echo "No fixup! commits to fold; nothing to do"
+          # Stateless: the set of commits to fold is defined by the fixup!
+          # prefix from the branch merge-base; no marker comment is read or
+          # written. Fold only the fixer's own fixups: a human-authored fixup!
+          # (or one without the aw-fixup-target trailer) must never trigger a
+          # rewrite of unrelated branch history.
+          fold=0
+          while IFS=$'\t' read -r sha author subject; do
+            case "$subject" in
+              "fixup! "*) ;;
+              *) continue ;;
+            esac
+            if [ "$author" != "github-actions[bot]" ]; then
+              echo "Non-fixer fixup! commit ${sha:0:12} ($author); nothing to fold"
+              exit 0
+            fi
+            if ! git log -1 --format=%B "$sha" | grep -q '^aw-fixup-target='; then
+              echo "Fixer fixup ${sha:0:12} has no aw-fixup-target trailer; nothing to fold"
+              exit 0
+            fi
+            fold=1
+          done < <(git log --format='%H%x09%an%x09%s' "$base..HEAD")
+          if [ "$fold" -eq 0 ]; then
+            echo "No fixer fixup! commits to fold; nothing to do"
             exit 0
           fi
 

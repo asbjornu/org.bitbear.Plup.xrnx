@@ -113,8 +113,10 @@ jobs:
 
 <!--
 Push auth: the push_to_pull_request_branch safe output pushes with the
-GH_AW_PUSH_TOKEN repo secret (a PAT with contents: write, pull-requests:
-write, and workflow scopes). gh-aw strict mode forbids granting contents:
+GH_AW_PUSH_TOKEN repo secret (a PAT with contents: write, issues: write,
+pull-requests: write, and workflow scopes). The orchestrator also posts and
+patches the state and failure comments on the PR with the same token, so
+`issues: write` is required. gh-aw strict mode forbids granting contents:
 write to the GITHUB_TOKEN, so a dedicated PAT is required; GitHub also
 refuses PAT pushes that touch .github/workflows/* without the workflow scope.
 
@@ -148,11 +150,10 @@ Security notes:
   runs as the same user; gh-aw has no out-of-workspace config mount for the
   OpenCode engine (the upstream Goose adapter has the same property). The token
   only unlocks the gateway, which enforces the same tool guard policies. The
-  staging step appends `opencode.jsonc` and `.opencode/` to the checkout-local
-  `.git/info/exclude` (which covers untracked files), unstages those paths, and
-  refuses to stage at all if either is (or contains) a symlink, so the file
-  cannot leak through `git add -A` even when the target branch already tracks
-  it or tracks it as a symlink.
+  staging step ignores and unstages the generated `opencode.jsonc` and refuses
+  to stage at all if it is a symlink, so the bearer cannot leak through
+  `git add -A` even when the target branch tracks the file. `.opencode/` is
+  left alone because it holds legitimate agent and skill files.
 - Same-repo guard: the pre-agent `steps:` guard rejects a dispatch whose
   `aw_context` does not name a same-repository pull request, so the agent never
   activates against untrusted fork code with repository secrets available.
@@ -227,7 +228,10 @@ raised, using the OpenCode CLI.
    that last touched it, so the branch history stays clean. Only target a commit
    that is a strict descendant of the branch merge-base (not the merge-base
    itself); if the file's last change predates the branch, create a normal
-   commit so the autosquash cannot leave an unfoldable `fixup!` behind:
+   commit so the autosquash cannot leave an unfoldable `fixup!` behind. If two
+   commits in the range share the target's subject, also create a normal
+   commit: `--autosquash` matches by subject, so an ambiguous subject could
+   attach the fix to the wrong commit:
      git config user.name "github-actions[bot]"
      git config user.email "github-actions[bot]@users.noreply.github.com"
      base=""
@@ -237,27 +241,29 @@ raised, using the OpenCode CLI.
          [ -n "$base" ] && break
        fi
      done
-     for p in opencode.jsonc .opencode/; do
-       grep -qxF "$p" .git/info/exclude 2>/dev/null \
-         || printf '%s\n' "$p" >> .git/info/exclude
-     done
-     # A PR can commit opencode.jsonc or .opencode as a symlink, so the adapter
-     # writes the bearer token through it into a tracked file. Refuse to stage
-     # if either path is (or contains) a symlink.
-     if [ -n "$(find opencode.jsonc .opencode -type l -print -quit 2>/dev/null)" ]; then
+     if ! grep -qxF opencode.jsonc .git/info/exclude 2>/dev/null; then
+       printf '%s\n' opencode.jsonc >> .git/info/exclude
+     fi
+     # A PR can commit opencode.jsonc as a symlink, so the adapter writes the
+     # bearer token through it into a tracked file. Refuse to stage if it is a
+     # symlink.
+     if [ -n "$(find opencode.jsonc -type l -print -quit 2>/dev/null)" ]; then
        echo "refusing to stage: runtime config path is a symlink" >&2
        exit 1
      fi
      git add -A
-     # A target branch may already track the runtime config; .git/info/exclude
-     # covers only untracked files, so unstage any change to these paths too.
-     git reset -q -- opencode.jsonc .opencode/ 2>/dev/null || true
+     # A target branch may already track opencode.jsonc; .git/info/exclude
+     # covers only untracked files, so unstage any change to it too. Do not
+     # touch .opencode/, which holds legitimate agent and skill files.
+     git reset -q -- opencode.jsonc 2>/dev/null || true
      while IFS= read -r -d '' f; do
        sha=$(git log -1 --format=%H -- "$f" || true)
+       subject=$(git log -1 --format=%s "$sha" 2>/dev/null || true)
        parents=$(git show -s --format=%P "$sha" 2>/dev/null | wc -w | tr -d ' ')
+       matches=$(git log --format=%s "$base..HEAD" 2>/dev/null | grep -Fxc "$subject" || true)
        if [ -n "$base" ] && [ -n "$sha" ] && [ "$sha" != "$base" ] \
           && git merge-base --is-ancestor "$base" "$sha" \
-          && [ "$parents" -le 1 ]; then
+          && [ "$parents" -le 1 ] && [ "$matches" = "1" ]; then
          git commit --fixup="$sha" -- "$f"
          git commit --amend -m "fixup! $(git log -1 --format=%s "$sha")" -m "aw-fixup-target=$sha"
        else
