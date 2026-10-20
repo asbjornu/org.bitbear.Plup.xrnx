@@ -93,11 +93,11 @@ do
     [1] = { index = 1, instrument_name = "Dark Dreams 1",
             protocol = "AU", identifier = "aumu:NiR5:-NI-",
             display_name = "AU: Native Instruments: Reaktor5",
-            preset_name = "Razor" },
+            preset_name = "Razor", active_program = 48 },
     ["Dark Dreams 1"] = { index = 1, instrument_name = "Dark Dreams 1",
             protocol = "AU", identifier = "aumu:NiR5:-NI-",
             display_name = "AU: Native Instruments: Reaktor5",
-            preset_name = "Razor" },
+            preset_name = "Razor", active_program = 48 },
   }
   local entries = up_inventory.scan(mock_song, nil, nil, nil, recovery)
   local dd
@@ -109,6 +109,8 @@ do
     "recovered from song.xml as Reaktor5 (not the opaque 'aumu:NiR5' path)")
   check(dd and dd.active_preset_name == "Razor",
     "loaded Reaktor ensemble ('Razor') recovered as preset name")
+  check(dd and dd.active_preset == 49,
+    "active program number recovered as 1-based (song.xml 48 -> API 49)")
   check(dd and dd.recovered and dd.broken, "marked recovered + broken")
 end
 
@@ -240,6 +242,68 @@ do
     "instrument active_preset_name captured from presets[index]")
   check(e and type(e.active_preset_data) == "string" and e.active_preset_data ~= "",
     "instrument active_preset_data captured")
+end
+
+section("up_inventory marks a recovered container plugin (Reaktor)")
+do
+  -- A Reaktor ensemble reference lives inside the decoded chunk, so a recovered
+  -- container must be flagged: the swap and the MIDI-setup prompt both key off it.
+  local function utf16(s)
+    local out = {}
+    for i = 1, #s do out[#out + 1] = s:sub(i, i) .. "\0" end
+    return table.concat(out)
+  end
+  local chunk = "\1\2" .. utf16("file://Razor.rkplr") .. "\0\0"
+  local recovery = {
+    [1] = { index = 1, instrument_name = "Dark Dreams 1",
+            display_name = "AU: Native Instruments: Reaktor5",
+            preset_name = "Razor", active_program = 48, preset_data = chunk },
+  }
+  local mock_song = {
+    instruments = {
+      { name = "Dark Dreams 1", plugin_properties = { plugin_loaded = false, plugin_device = nil } },
+    },
+    tracks = {},
+  }
+  local entries = up_inventory.scan(mock_song, nil, nil, nil, recovery)
+  local dd
+  for _, e in ipairs(entries) do
+    if e.kind == "instrument" and e.instrument_name == "Dark Dreams 1" then dd = e end
+  end
+  check(dd ~= nil, "recovered container instrument surfaced")
+  check(dd and dd.ensemble_preset == true,
+    "a recovered Reaktor chunk is flagged as a container (ensemble_preset)")
+end
+
+section("up_inventory marks a loaded container plugin (Reaktor)")
+do
+  -- A loaded Reaktor returns from inspect_instrument before the Song.xml recovery
+  -- path, so the container flag must also be set from the live decoded chunk --
+  -- otherwise the upgrade/MIDI-setup gate never fires for a loaded device.
+  local function utf16(s)
+    local out = {}
+    for i = 1, #s do out[#out + 1] = s:sub(i, i) .. "\0" end
+    return table.concat(out)
+  end
+  local raw = "\1\2" .. utf16("file://Razor.rkplr") .. "\0\0"
+  local wrapper = '<?xml version="1.0"?><FilterDevicePreset><DeviceSlot><ParameterChunk><![CDATA['
+    .. up_preset.encode_chunk(raw) .. ']]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local mock_song = {
+    instruments = {
+      { name = "Dark Dreams 1", plugin_properties = { plugin_loaded = true,
+        plugin_device = { device_path = "/P/Reaktor5.vst", name = "VST: Native Instruments: Reaktor5",
+          active_preset_data = wrapper, active_preset = 1, presets = { "Razor" }, parameters = {} } } },
+    },
+    tracks = {},
+  }
+  local entries = up_inventory.scan(mock_song, nil, nil, nil)
+  local dd
+  for _, e in ipairs(entries) do
+    if e.kind == "instrument" and e.instrument_name == "Dark Dreams 1" then dd = e end
+  end
+  check(dd ~= nil, "loaded Reaktor instrument surfaced")
+  check(dd and dd.ensemble_preset == true,
+    "a loaded Reaktor device is flagged as a container from its decoded chunk")
 end
 
 section("coverage: up_inventory.scan surfaces a track plugin device")
