@@ -7,7 +7,9 @@ name: Sensitive file warning
 # PR no longer touches anything sensitive.
 
 on:
-  pull_request:
+  # Run from the base branch so a PR cannot modify this warning logic. The job
+  # only reads PR files and manages the sticky comment via the API.
+  pull_request_target:
     types: [opened, ready_for_review, reopened, synchronize]
 
 permissions:
@@ -52,6 +54,7 @@ jobs:
           ^LICENSE$
           ^(package|package-lock)\.json$
           ^(yarn|pnpm-lock)\.(lock|yaml)$
+          \.rockspec$
           ^opencode\.jsonc$
           ^\.opencode/
           PATTERNS

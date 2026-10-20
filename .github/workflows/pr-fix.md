@@ -149,8 +149,9 @@ Security notes:
   OpenCode engine (the upstream Goose adapter has the same property). The token
   only unlocks the gateway, which enforces the same tool guard policies. The
   staging step appends `opencode.jsonc` and `.opencode/` to the checkout-local
-  `.git/info/exclude`, so a target branch that does not carry the root
-  `.gitignore` rules cannot leak the file through `git add -A`.
+  `.git/info/exclude` (which covers untracked files) and then unstages those
+  paths, so the file cannot leak through `git add -A` even when the target
+  branch already tracks it.
 - Same-repo guard: the pre-agent `steps:` guard rejects a dispatch whose
   `aw_context` does not name a same-repository pull request, so the agent never
   activates against untrusted fork code with repository secrets available.
@@ -240,7 +241,10 @@ raised, using the OpenCode CLI.
          || printf '%s\n' "$p" >> .git/info/exclude
      done
      git add -A
-     for f in $(git diff --cached --name-only); do
+     # A target branch may already track the runtime config; .git/info/exclude
+     # covers only untracked files, so unstage any change to these paths too.
+     git reset -q -- opencode.jsonc .opencode/ 2>/dev/null || true
+     while IFS= read -r -d '' f; do
        sha=$(git log -1 --format=%H -- "$f" || true)
        parents=$(git show -s --format=%P "$sha" 2>/dev/null | wc -w | tr -d ' ')
        if [ -n "$base" ] && [ -n "$sha" ] && [ "$sha" != "$base" ] \
@@ -251,7 +255,7 @@ raised, using the OpenCode CLI.
        else
          git commit -m "fix: address Copilot review ($f)" -- "$f"
        fi
-     done
+     done < <(git diff --cached --name-only -z)
    A follow-up workflow autosquashes these fixups and force-pushes. Do not run
    `git push` or force-push yourself; transport the commits with the safe
    output in step 6.
