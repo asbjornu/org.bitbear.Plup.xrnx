@@ -56,8 +56,11 @@ them while trying to preserve the previous preset/state.
     snapshot bank, so the per-instance snapshot is selected over a MIDI loopback
     (see *Reaktor 6 MIDI setup* below): Plup sends Bank Select CCs to move
     Reaktor's bank and lets Renoise choose the program, confirming the hit by the
-    snapshot name embedded in the serialized state. Without the loopback, Reaktor
-    instances still get the ensemble but only first-bank snapshots resolve.
+    snapshot name embedded in the serialized state. A Reaktor upgrade therefore
+    needs the loopback: when no loopback port is available the dialog stops
+    before swapping anything and offers the one-time setup below, rather than
+    silently leaving each instance on a first-bank snapshot. Upgrades that
+    involve no Reaktor instance run without the loopback.
   - **Reaktor 6 MIDI setup (one-time).** Bank Select is unreachable from the
     plugin API, so Plup needs a MIDI loopback port:
     1. macOS: open **Audio MIDI Setup → Window → Show MIDI Studio**,
