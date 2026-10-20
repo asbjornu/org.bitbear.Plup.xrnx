@@ -55,6 +55,19 @@ them.
   `up_song_xml`, `up_donor`, `up_midi`) plus `renoise` go in `globals`
   (read-write), or CI fails with "setting read-only field".
 
+## PR fixer
+
+`.github/workflows/pr-fix-orchestrator.yml` dispatches `pr-fix` when a new
+Copilot review lands on a same-repo PR by `PR_FIX_AUTHOR`. Failed runs are
+reported on the PR they were dispatched for. The agent fixes the findings,
+replies on the threads, and resolves and hides the ones it fixed.
+
+`pr-fix-squash.yml` is stateless: on `synchronize` it folds every `fixup!`
+commit in `merge-base..HEAD` with
+`git rebase -i --autosquash --rebase-merges` and pushes with
+`--force-with-lease`. With no `fixup!` present it is a no-op. A
+fixer-managed branch may need a reset after the squash re-SHAs commits.
+
 ## Layout
 
 - `main.lua` entry → loads `up_ui`; `lib/up_*.lua` are modules;
