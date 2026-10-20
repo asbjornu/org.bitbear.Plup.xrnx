@@ -223,7 +223,8 @@ _G.section("compile-check all sources")
 local sources = { "main.lua", "lib/up_core.lua", "lib/up_inventory.lua",
   "lib/up_matching.lua", "lib/up_preset.lua", "lib/up_scheduler.lua",
   "lib/up_song_xml.lua", "lib/up_swap.lua", "lib/up_ui.lua", "lib/up_plugin_analysis.lua",
-  "lib/up_donor.lua", "lib/up_donor_data.lua", "lib/up_midi.lua", "lib/up_zip.lua" }
+  "lib/up_donor.lua", "lib/up_donor_data.lua", "lib/up_midi.lua", "lib/up_zip.lua",
+  "lib/up_vst3.lua" }
 for _, s in ipairs(sources) do
   local f, err = loadfile(root .. "/" .. s)
   _G.check(f ~= nil, "compiles: " .. s .. (err and (" (" .. err .. ")") or ""))
@@ -239,6 +240,7 @@ require("spec.song_xml_spec")
 require("spec.inventory_spec")
 require("spec.swap_spec")
 require("spec.donor_spec")
+require("spec.vst3_spec")
 require("spec.midi_spec")
 require("spec.scheduler_spec")
 require("spec.zip_spec")
