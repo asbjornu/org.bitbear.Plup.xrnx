@@ -68,7 +68,7 @@ jobs:
             --jq '.[] | select(.commit.message | startswith("fixup!")) | (.author.login // "unknown")')
           if [ -n "$fixup_authors" ] && printf '%s\n' "$fixup_authors" | is_all_bot; then
             marker_head=$(gh api --paginate "repos/$REPO/issues/$PR/comments?per_page=100" \
-              --jq '.[] | select(.body | startswith("<!-- aw-pr-fix-state")) | "\(.created_at)\t\(.user.login)\t\(.body)"' \
+              --jq '.[] | select(.body | contains("<!-- aw-pr-fix-state")) | "\(.created_at)\t\(.user.login)\t\(.body)"' \
               | sort | awk -F'\t' -v who="$token_user" '$2 == who { out = $0 } END { if (out != "") print out }' \
               | sed -n 's/.*head=\([0-9a-f]*\).*/\1/p')
             status="diverged"
@@ -86,7 +86,7 @@ jobs:
               && { [ "$status" = "ahead" ] || [ "$status" = "identical" ]; } \
               && [ -n "$range_authors" ] \
               && printf '%s\n' "$range_authors" | is_all_bot; then
-              echo "Head has only fixer commits under an active dispatch; the squash workflow will re-request"
+              echo "Head has only fixer commits under an active dispatch; the squash workflow folds them and the ensuing push re-requests"
               exit 0
             fi
             echo "Fixer fixup! commits present but no purely-fixer active dispatch; requesting a review"

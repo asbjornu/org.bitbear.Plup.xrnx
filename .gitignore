@@ -1,6 +1,7 @@
 *.xrnx
 luacov.stats.out
 coverage.lcov
+.github/aw/logs
 # Runtime OpenCode configuration written into the workspace by the gh-aw PR
 # fixer. It carries the MCP gateway bearer token, so it must never be staged by
 # the agent's `git add -A` or pushed to a pull request.
