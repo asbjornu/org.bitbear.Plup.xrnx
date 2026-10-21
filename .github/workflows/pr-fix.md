@@ -260,7 +260,7 @@ raised, using the OpenCode CLI.
        sha=$(git log -1 --format=%H -- "$f" || true)
        subject=$(git log -1 --format=%s "$sha" 2>/dev/null || true)
        parents=$(git show -s --format=%P "$sha" 2>/dev/null | wc -w | tr -d ' ')
-       matches=$(git log --format=%s "$base..HEAD" 2>/dev/null | grep -Fxc "$subject" || true)
+       matches=$(git log --format=%s "$base..HEAD" 2>/dev/null | grep -Fxc -- "$subject" || true)
        if [ -n "$base" ] && [ -n "$sha" ] && [ "$sha" != "$base" ] \
           && git merge-base --is-ancestor "$base" "$sha" \
           && [ "$parents" -le 1 ] && [ "$matches" = "1" ]; then
