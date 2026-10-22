@@ -719,3 +719,3635 @@ do
     "bypassed instrument loads the matching preset")
   check(bypassed.is_active == false, "bypass state is restored after preset transfer")
 end
+
+section("up_swap uses preset + parameters for a ParameterBag")
+do
+  -- Renoise serializes Saturn as a parameter bag (normalized values), not as a
+  -- native FabFilter preset. Replaying the bag by index carries Saturn 1's
+  -- "Warm Tape" style (4/15) into Saturn 2, whose larger style enum reads that
+  -- value as "Old Tape". A bag contains only parameters, so match the old
+  -- preset name first and then overlay the values, remapping changed enums by
+  -- their display label. Both quanta are 0 here, as Renoise reports for some
+  -- plugin parameters, so the label itself must trigger the remap.
+  local function saturn_style_parameter(value)
+    local state = { value = value }
+    local labels = {
+      [0] = "Subtle Tube", [1] = "Clean Tube", [2] = "Warm Tube", [3] = "Broken Tube",
+      [4] = "Subtle Tape", [5] = "Clean Tape", [6] = "Warm Tape", [7] = "Old Tape",
+    }
+    local function label_for(current)
+      local index = math.floor(current * 27 + 0.5)
+      return labels[index] or ("Style " .. tostring(index))
+    end
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Band 1 Style" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then return label_for(state.value) end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          -- Plugin enum parameters snap to the nearest option.
+          state.value = math.floor(new_value * 27 + 0.5) / 27
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+
+  local new_style, new_state = saturn_style_parameter(0)
+  local new_dev = { is_active = true, active_preset_data = "",
+    presets = { "Init", "Some Other" }, active_preset = 0, parameters = { new_style } }
+  local old_dev = { is_active = true, active_preset = 1, presets = { "Init" },
+    active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Band 1 Style", value = 4 / 15, is_automatable = true,
+        value_quantum = 0, value_string = "Warm Tape" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev)
+      return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn.vst", device_name = "VST: FabFilter: Saturn",
+    active_preset_name = "Init",
+    analysis = analyze("VST: FabFilter: Saturn", "/P/Saturn.vst", "VST") }
+  local candidate = { name = "FabFilter Saturn 2", protocol = "VST", path = "/P/Saturn2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok, "the ParameterBag upgrade completes")
+  check(ok and res and res.status == "upgraded-parameter-synth",
+    "the bag uses preset + parameter overlay instead of a raw transplant")
+  check(new_dev.active_preset == 1, "the old preset name ('Init') is matched first")
+  check(math.abs(new_state.value - 6 / 27) < 0.000001,
+    "Warm Tape is remapped by label to Saturn 2's index, not replayed as 4/15")
+  check(new_dev.active_preset_data == "",
+    "the old parameter bag is not transplanted verbatim")
+end
+section("up_swap remaps digit-bearing enum labels without a quantum")
+do
+  -- Renoise can report value_quantum = 0 even for enum parameters. Oversampling
+  -- labels such as "2x" and "4x" must still be matched by label: the old bank
+  -- [Off, 2x, 4x] stores 2x at 0.5, but in [Off, 2x, 4x, 8x, 16x] that value is
+  -- 4x, while 2x is 0.25.
+  local function enum_parameter(name, labels, value)
+    local state = { value = value, writes = 0 }
+    local last = #labels - 1
+    local function label_for(current)
+      local index = math.floor(current * last + 0.5)
+      return labels[index + 1] or "?"
+    end
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return name end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then return label_for(state.value) end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.writes = state.writes + 1
+          -- Plugin enums snap to the nearest option.
+          state.value = math.floor(new_value * last + 0.5) / last
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+
+  local new_param, new_state = enum_parameter("Oversampling", { "Off", "2x", "4x", "8x", "16x" }, 0)
+  local new_dev = { is_active = true, active_preset_data = "", presets = {}, parameters = { new_param } }
+  local old_dev = { is_active = true, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Oversampling", value = 0.5, is_automatable = true,
+        value_quantum = 0, value_string = "2x" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev)
+      return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/ProL.vst", device_name = "VST: FabFilter Pro-L",
+    analysis = analyze("VST: FabFilter Pro-L", "/P/ProL.vst", "VST") }
+  local candidate = { name = "FabFilter Pro-L 2", protocol = "VST", path = "/P/ProL2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the enum overlay completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "2x is remapped to the new bank's index instead of replayed as 4x")
+  check(new_state.value ~= 0.5, "the old normalized value must not select 4x")
+end
+
+section("up_swap remaps numeric-only enum labels using the captured quantum")
+do
+  -- Some option banks label their choices with bare integers ("1", "2", "4"),
+  -- so the textual heuristic cannot spot them. The captured quantum (0.5 over
+  -- three options) marks the parameter as discrete: the old "2" (0.5) must
+  -- remap to the replacement's "2" (0.25), not replay 0.5 onto "4".
+  local function numeric_enum_parameter(labels, quantum, value)
+    local state = { value = value }
+    local function label_for(current)
+      local index = math.floor(current / quantum + 0.5)
+      return labels[index + 1] or "?"
+    end
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Ratio" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then return label_for(state.value) end
+        if key == "value_quantum" then return quantum end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          -- Plugin enums snap to the nearest option.
+          state.value = math.floor(new_value / quantum + 0.5) * quantum
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+
+  local new_param, new_state = numeric_enum_parameter({ "1", "2", "4", "8", "16" }, 0.25, 0)
+  local new_dev = { is_active = true, active_preset_data = "", presets = {}, parameters = { new_param } }
+  local old_dev = { is_active = true, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Ratio", value = 0.5, is_automatable = true,
+        value_quantum = 0.5, value_string = "2" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev)
+      return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Comp.vst", device_name = "VST: Example Comp",
+    analysis = analyze("VST: Example Comp", "/P/Comp.vst", "VST") }
+  local candidate = { name = "Example Comp 2", protocol = "VST", path = "/P/Comp2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the numeric enum overlay completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "the numeric-only '2' remaps to the new bank's index instead of replaying 0.5 as '4'")
+  check(new_state.value ~= 0.5, "the old normalized value must not select '4'")
+end
+
+section("up_swap remaps fractional musical-time enum labels")
+do
+  -- A quantized tempo-sync bank labels its choices "1/8", "1/4", "1/2". Those
+  -- contain no letters and no bare integer, so the textual and integer
+  -- heuristics miss them; the captured quantum reveals the small discrete bank,
+  -- so the saved "1/4" (0.5 in a 3-option bank) must remap by label to the
+  -- replacement's "1/4" (0.25), not replay 0.5 onto "1/2".
+  local function sync_parameter(labels, quantum, value)
+    local state = { value = value }
+    local function label_for(current)
+      local index = math.floor(current / quantum + 0.5)
+      return labels[index + 1] or "?"
+    end
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Sync" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then return label_for(state.value) end
+        if key == "value_quantum" then return quantum end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value / quantum + 0.5) * quantum
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+
+  local new_param, new_state = sync_parameter({ "1/8", "1/4", "1/2", "1", "2" }, 0.25, 0)
+  local new_dev = { is_active = true, active_preset_data = "", presets = {}, parameters = { new_param } }
+  local old_dev = { is_active = true, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Sync", value = 0.5, is_automatable = true,
+        value_quantum = 0.5, value_string = "1/4" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev)
+      return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Delay.vst", device_name = "VST: Example Delay",
+    analysis = analyze("VST: Example Delay", "/P/Delay.vst", "VST") }
+  local candidate = { name = "Example Delay 2", protocol = "VST", path = "/P/Delay2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the fractional enum overlay completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "the fractional '1/4' remaps to the new bank's index instead of replaying 0.5 as '1/2'")
+  check(new_state.value ~= 0.5, "the old normalized value must not select '1/2'")
+end
+
+section("up_swap keeps label lookup for a zero-quantum numeric enum replacement")
+do
+  -- The replacement reports no quantum, so the discrete-quantum test cannot
+  -- classify it. It is not fine-grained either, so the numeric-only enum label
+  -- must keep using the label lookup; the sampling fallback finds "2" at 0.25
+  -- instead of replaying the old 0.5 onto "4".
+  local function zero_quantum_parameter(labels, step, value)
+    local state = { value = value }
+    local function label_for(current)
+      local index = math.floor(current / step + 0.5)
+      return labels[index + 1] or "?"
+    end
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Ratio" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then return label_for(state.value) end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value / step + 0.5) * step
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+
+  local new_param, new_state = zero_quantum_parameter({ "1", "2", "4", "8", "16" }, 0.25, 0)
+  local new_dev = { is_active = true, active_preset_data = "", presets = {}, parameters = { new_param } }
+  local old_dev = { is_active = true, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Ratio", value = 0.5, is_automatable = true,
+        value_quantum = 0.5, value_string = "2" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev)
+      return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Comp.vst", device_name = "VST: Example Comp",
+    analysis = analyze("VST: Example Comp", "/P/Comp.vst", "VST") }
+  local candidate = { name = "Example Comp 2", protocol = "VST", path = "/P/Comp2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth",
+    "the zero-quantum numeric enum overlay completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "the sampling fallback finds '2' at 0.25 instead of replaying 0.5 as '4'")
+  check(new_state.value ~= 0.5, "the old normalized value must not select '4'")
+end
+
+section("up_swap bounds exhaustive label probing")
+do
+  -- A tiny reported quantum (or a formatted numeric label that never matches)
+  -- must not make label lookup walk a million plugin steps. The probe budget is
+  -- 256; exceeding it leaves the base option alone instead of replaying an
+  -- unrelated enum index.
+  local state = { value = 0, writes = 0 }
+  local parameter = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Band 1 Style" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return state.value end
+      if key == "value_string" then return "Other" end
+      if key == "value_quantum" then return 0.000001 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        state.writes = state.writes + 1
+        state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {}, parameters = { parameter } }
+  local old_dev = { is_active = true, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Band 1 Style", value = 4 / 15, is_automatable = true,
+        value_quantum = 0, value_string = "Warm Tape" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev)
+      return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn.vst", device_name = "VST: FabFilter: Saturn",
+    analysis = analyze("VST: FabFilter: Saturn", "/P/Saturn.vst", "VST") }
+  local candidate = { name = "FabFilter Saturn 2", protocol = "VST", path = "/P/Saturn2.vst" }
+
+  local ok = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok, "the bounded probe completes")
+  check(state.writes <= 256, "label lookup performs at most 256 plugin writes")
+  check(state.value == 0, "the base option is kept when the label cannot be probed")
+end
+
+section("up_swap keeps the raw bag fallback within one format")
+do
+  local bag = '<FilterDevicePreset><DeviceSlot>'
+    .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+    .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local function run(old_protocol, candidate_protocol)
+    local new_dev = { is_active = true, active_preset_data = "", presets = {}, active_preset = 0,
+      parameters = {} }
+    local old_dev = { is_active = true, active_preset = 0, presets = {},
+      active_preset_data = bag, parameters = {} }
+    local track = {
+      devices = { [1] = {}, [2] = old_dev },
+      insert_device_at = function(self, _path, index)
+        table.insert(self.devices, index, new_dev); return new_dev
+      end,
+      delete_device_at = function(self, index) table.remove(self.devices, index) end,
+    }
+    local song = { tracks = { track }, instruments = {},
+      automation = function() return { is_automated = false } end }
+    local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+      device_path = "/P/OD.vst", device_name = "VST: Example Overdrive",
+      analysis = analyze("VST: Example Overdrive", "/P/OD.vst", old_protocol) }
+    local candidate = { name = "Example Overdrive 2", protocol = candidate_protocol,
+      path = "/P/OD2.vst3" }
+    local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+    return ok, res, new_dev
+  end
+
+  local ok_same, res_same, new_same = run("VST", "VST")
+  check(ok_same and res_same and res_same.status == "upgraded-with-parameters",
+    "a same-format unmapped bag still falls back to a raw transplant")
+  check(new_same.active_preset_data == bag, "the same-format bag is transplanted")
+
+  local ok_cross, res_cross, new_cross = run("VST", "VST3")
+  check(ok_cross and res_cross and res_cross.status == "upgraded-default",
+    "a cross-format unmapped bag is not replayed by index")
+  check(new_cross.active_preset_data == "", "the cross-format bag is left at default state")
+end
+
+section("up_swap bounds label probing on a fine-grained numeric parameter")
+do
+  -- A continuous parameter can report a tiny positive quantum, which would make
+  -- an exhaustive step walk millions of synchronous writes and stall Renoise.
+  -- The walk must bail out and fall back to the numeric transfer.
+  local value_writes = 0
+  local state = { value = 0 }
+  local param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Cutoff" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return state.value end
+      if key == "value_string" then return string.format("%.2f", state.value) end
+      if key == "value_quantum" then return 0.000001 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        value_writes = value_writes + 1
+        state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {}, active_preset = 0,
+    parameters = { param } }
+  local old_dev = { is_active = true, active_preset = 0, presets = {},
+    active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Cutoff", value = 0.4, is_automatable = true,
+        value_quantum = 0.01, value_string = "0.40" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/EQ.vst", device_name = "VST: Example EQ",
+    analysis = analyze("VST: Example EQ", "/P/EQ.vst", "VST") }
+  local candidate = { name = "Example EQ 2", protocol = "VST", path = "/P/EQ2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok, "the fine-grained parameter upgrade completes")
+  check(ok and res and res.status == "upgraded-parameter-synth",
+    "a fine-grained parameter falls back instead of probing every step")
+  check(value_writes < 300, "the label probe stays within its budget")
+  check(math.abs(state.value - 0.4) < 0.000001, "the numeric value is transferred")
+end
+
+section("up_swap keeps an instrument bypassed after a preset load")
+do
+  -- A matching factory preset can reset is_active when it is loaded. The
+  -- instrument caller must restore the old bypass flag after transfer_state,
+  -- just like the track-device caller does. The replacement maps the captured
+  -- control, so the preset load runs before the parameter overlay.
+  local new_state = { active_preset = 0, is_active = true }
+  local new_dev = setmetatable({}, {
+    __index = function(_, key)
+      if key == "presets" then return { "Init" } end
+      if key == "parameters" then return { { name = "Mix", value = 0, is_automatable = true } } end
+      if key == "active_preset_data" then return "" end
+      if key == "active_preset" then return new_state.active_preset end
+      if key == "is_active" then return new_state.is_active end
+      return nil
+    end,
+    __newindex = function(_, key, value)
+      if key == "active_preset" then
+        new_state.active_preset = value
+        -- A preset load re-enables the plugin.
+        new_state.is_active = true
+      elseif key == "is_active" then
+        new_state.is_active = value
+      else
+        rawset(_, key, value)
+      end
+    end,
+  })
+  local old_dev = { is_active = false, active_preset = 1, presets = { "Init" },
+    active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { { name = "Mix", value = 0.5, is_automatable = true } } }
+  local pp = { plugin_loaded = true, plugin_device = old_dev,
+    load_plugin = function(self, _path) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, tracks = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
+    instrument_name = "Saturn 2", device_path = "/P/Saturn2.vst3",
+    analysis = analyze("VST3: FabFilter: Saturn 2", "/P/Saturn2.vst3", "VST3") }
+  local candidate = analyze("VST3: FabFilter: Saturn 2", "/P/Saturn2-new.vst3", "VST3")
+  candidate.path = "/P/Saturn2-new.vst3"
+
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth",
+    "the mapped control is overlaid after the preset load")
+  check(new_state.is_active == false, "the instrument's old bypass state is restored last")
+end
+
+section("up_swap does not replay a bag when enum labels were rejected")
+do
+  -- No preset matches and the replacement does not expose the old enum label.
+  -- The overlay deliberately keeps the replacement's option instead of an
+  -- unrelated index; the raw same-format fallback must not undo that decision.
+  local new_state = { value = 0 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Band 1 Style" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return "Other" end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local bag = '<FilterDevicePreset><DeviceSlot>'
+    .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+    .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local old_dev = { is_active = true, presets = {}, active_preset_data = bag,
+    parameters = {
+      { name = "Band 1 Style", value = 4 / 15, is_automatable = true,
+        value_quantum = 0, value_string = "Warm Tape" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = { name = "FabFilter Saturn 2", protocol = "VST", path = "/P/Saturn2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-default",
+    "an unavailable enum label falls back to the default state, not a raw replay")
+  check(new_dev.active_preset_data == "", "the bag is not replayed after a rejected label")
+end
+
+section("up_swap transfers attached-unit numeric values")
+do
+  -- Continuous displays may attach their unit ("0.413ms", "-3.0dB"). Those
+  -- must keep the numeric transfer; only genuine option labels like "2x" are
+  -- enum-like. The replacement's formatted label differs, so label lookup
+  -- cannot recover the value either.
+  local new_state = { value = 0 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Attack" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return string.format("%.2f ms", new_state.value) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Attack", value = 0.413, is_automatable = true,
+        value_quantum = 0, value_string = "0.413ms" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Comp.vst", device_name = "VST: Example Comp",
+    analysis = analyze("VST: Example Comp", "/P/Comp.vst", "VST") }
+  local candidate = { name = "Example Comp 2", protocol = "VST", path = "/P/Comp2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the numeric overlay completes")
+  check(math.abs(new_state.value - 0.413) < 0.000001,
+    "an attached-unit display keeps its numeric value")
+end
+
+section("up_swap transplant a missing instrument's recovered bag")
+do
+  -- A missing plugin has no live parameters to overlay. Its recovered
+  -- ParameterBag must still take the compatible direct transplant; selecting a
+  -- factory preset instead would lose the saved parameter tweaks.
+  local bag = '<FilterDevicePreset><DeviceSlot>'
+    .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+    .. '<ParameterChunk><![CDATA[warm-tape-state]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local new_dev = { is_active = true, active_preset_data = "", presets = { "Init" },
+    active_preset = 0, parameters = {} }
+  local pp = { plugin_loaded = false, plugin_device = nil,
+    load_plugin = function(self, _path) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, tracks = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = true, plugin_loaded = false,
+    instrument_name = "Saturn 2", active_preset_name = "Init", active_preset_data = bag,
+    analysis = analyze("VST3: FabFilter: Saturn 2", nil, "VST3") }
+  local candidate = analyze("VST3: FabFilter: Saturn 2", "/P/Saturn2.vst3", "VST3")
+  candidate.path = "/P/Saturn2.vst3"
+
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-with-parameters",
+    "the recovered bag is transplanted instead of only matching the preset")
+  check(new_dev.active_preset_data == bag, "the saved parameter state is preserved")
+end
+
+section("up_swap does not replay a bag when parameters mapped but failed")
+do
+  -- A mapped parameter whose value cannot be written is still a mapping. The
+  -- raw bag must not be replayed, because that would overwrite the overlay's
+  -- deliberate result with unrelated source indices.
+  local new_state = { value = 0.5 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mix" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return "0.50" end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, _new_value)
+      error("read-only " .. key)
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local bag = '<FilterDevicePreset><DeviceSlot>'
+    .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+    .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local old_dev = { is_active = true, presets = {}, active_preset_data = bag,
+    parameters = {
+      { name = "Mix", value = 0.7, is_automatable = true,
+        value_quantum = 0, value_string = "0.70" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = { name = "FabFilter Saturn 2", protocol = "VST", path = "/P/Saturn2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-default",
+    "a mapped-but-unwritable parameter keeps the default state")
+  check(new_dev.active_preset_data == "", "the bag is not replayed after a mapping")
+end
+
+section("up_swap keeps a compatible track bag without captured parameters")
+do
+  -- A same-product/version, same-format track replacement whose controls are all
+  -- non-automatable captures no live parameters, but its compatible ParameterBag
+  -- still holds the saved state. A matching factory preset must not shadow the
+  -- direct transplant and discard those tweaks.
+  local bag = '<FilterDevicePreset><DeviceSlot>'
+    .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+    .. '<ParameterChunk><![CDATA[custom-state]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local new_dev = { is_active = true, active_preset_data = "", presets = { "Init" },
+    active_preset = 0, parameters = {} }
+  local old_dev = { is_active = true, active_preset = 0, presets = {}, active_preset_data = bag,
+    parameters = {} }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2.vst", device_name = "VST: FabFilter: Saturn 2",
+    active_preset_name = "Init",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-new.vst", "VST")
+  candidate.path = "/P/Saturn2-new.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-with-parameters",
+    "a compatible bag is transplanted even with no captured parameters")
+  check(new_dev.active_preset_data == bag, "the saved parameter state is preserved")
+  check(new_dev.active_preset == 0, "the matching preset does not shadow the compatible bag")
+end
+
+section("up_swap does not wrap a missing instrument's bag across formats")
+do
+  -- A missing instrument across VST -> VST3 has no live parameters to verify a
+  -- write against, and a ParameterBag is host parameter data, not native engine
+  -- state. A converted transplant must not wrap it as a Comp chunk; a matching
+  -- factory preset is used instead.
+  local bag = '<FilterDevicePreset><DeviceSlot>'
+    .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+    .. '<ParameterChunk><![CDATA[custom-state]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local new_dev = { is_active = true, active_preset_data = "", presets = { "Saturn 2 Init" },
+    active_preset = 0, parameters = {} }
+  local pp = { plugin_loaded = false, plugin_device = nil,
+    load_plugin = function(self, _path) self.plugin_device = new_dev; return true end }
+  local song = { instruments = { { plugin_properties = pp } }, tracks = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = true, plugin_loaded = false,
+    instrument_name = "Saturn 2", active_preset_name = "Saturn 2 Init", active_preset_data = bag,
+    analysis = analyze("VST: FabFilter: Saturn 2", nil, "VST") }
+  local candidate = analyze("VST3: FabFilter: Saturn 2", "/P/Saturn2.vst3", "VST3")
+  candidate.path = "/P/Saturn2.vst3"
+
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-name-matched-preset",
+    "a cross-format bag uses a matching preset instead of a native wrap")
+  check(new_dev.active_preset == 1, "the matching factory preset is selected")
+  check(new_dev.active_preset_data == "",
+    "the host parameter bag is not injected as native plugin state")
+end
+
+section("up_swap falls back to a raw bag when parameters cannot be read")
+do
+  -- If reading the replacement's parameters fails or returns nil,
+  -- apply_parameter_values must still report zero mappings (not nil), so a
+  -- same-format ParameterBag with no matching preset falls back to the raw
+  -- transplant instead of being left at default state.
+  local bag = '<FilterDevicePreset><DeviceSlot>'
+    .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+    .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local new_dev = { is_active = true, active_preset_data = "", presets = {}, active_preset = 0 }
+  local old_dev = { is_active = true, active_preset = 0, presets = {}, active_preset_data = bag,
+    parameters = {
+      { name = "Mix", value = 0.7, is_automatable = true, value_quantum = 0, value_string = "0.70" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/OD.vst", device_name = "VST: Example Overdrive",
+    analysis = analyze("VST: Example Overdrive", "/P/OD.vst", "VST") }
+  local candidate = { name = "Example Overdrive 2", protocol = "VST", path = "/P/OD2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-with-parameters",
+    "an unreadable parameter list still allows the raw same-format fallback")
+  check(new_dev.active_preset_data == bag, "the bag is transplanted when nothing could be mapped")
+end
+
+section("up_swap applies continuous values that share a rounded display")
+do
+  -- Continuous controls can round to the same display string ("0.41") while
+  -- holding different values (0.413 vs 0.410). Display equality must not skip
+  -- the numeric write just because the quanta differ.
+  local new_state = { value = 0.410 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Attack" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return "0.41" end
+      if key == "value_quantum" then return 0.000001 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local bag = '<FilterDevicePreset><DeviceSlot>'
+    .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+    .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local old_dev = { is_active = true, presets = {}, active_preset_data = bag,
+    parameters = {
+      { name = "Attack", value = 0.413, is_automatable = true,
+        value_quantum = 0.001, value_string = "0.41" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = { name = "FabFilter Saturn 2", protocol = "VST", path = "/P/Saturn2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the continuous overlay completes")
+  check(math.abs(new_state.value - 0.413) < 0.000001,
+    "the saved continuous value is written even when the display strings match")
+end
+
+section("up_swap transplants a bag when capture omits non-automatable controls")
+do
+  -- A track snapshot only captures automatable controls. When a non-automatable
+  -- control is omitted, the compatible bag must be transplanted so the omitted
+  -- saved setting is not lost with the old device.
+  local bag = '<FilterDevicePreset><DeviceSlot>'
+    .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+    .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { { name = "Mix", value = 0.5, is_automatable = true } } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = bag,
+    parameters = {
+      { name = "Mix", value = 0.7, is_automatable = true },
+      { name = "Hidden", value = 0.3, is_automatable = false },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-with-parameters",
+    "an incomplete snapshot keeps the compatible direct transplant")
+  check(new_dev.active_preset_data == bag, "the omitted non-automatable setting is preserved")
+end
+
+section("up_swap transplants a bag when captured control names are duplicated")
+do
+  -- The name-keyed overlay can restore only the first of two controls sharing a
+  -- name, so a duplicated snapshot is not complete. The compatible ParameterBag
+  -- must be transplanted so the second control's saved value is not lost.
+  local bag = '<FilterDevicePreset><DeviceSlot>'
+    .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+    .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = {
+      { name = "Gain", value = 0.5, is_automatable = true },
+      { name = "Gain", value = 0.5, is_automatable = true },
+    } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = bag,
+    parameters = {
+      { name = "Gain", value = 0.7, is_automatable = true },
+      { name = "Gain", value = 0.3, is_automatable = true },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-with-parameters",
+    "a duplicated snapshot keeps the compatible direct transplant")
+  check(new_dev.active_preset_data == bag, "the duplicate-named control's saved value is preserved")
+end
+
+section("up_swap remaps unit-bearing discrete option banks")
+do
+  -- A slope bank labels its choices with integer values and a unit
+  -- ("12 dB/oct"). The bounded quantum (0.5 over three options) marks it as
+  -- discrete, so the saved 24 dB/oct (0.5) must remap by label into the
+  -- replacement's five-option bank (0.75), not replay 0.5 as 18 dB/oct.
+  local function slope_parameter(labels, quantum, value)
+    local state = { value = value }
+    local function label_for(current)
+      local index = math.floor(current / quantum + 0.5)
+      return labels[index + 1] or "?"
+    end
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Slope" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then return label_for(state.value) end
+        if key == "value_quantum" then return quantum end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          -- Plugin enums snap to the nearest option.
+          state.value = math.floor(new_value / quantum + 0.5) * quantum
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+
+  local new_param, new_state = slope_parameter(
+    { "6 dB/oct", "12 dB/oct", "18 dB/oct", "24 dB/oct", "48 dB/oct" }, 0.25, 0)
+  local new_dev = { is_active = true, active_preset_data = "", presets = {}, parameters = { new_param } }
+  local old_dev = { is_active = true, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Slope", value = 0.5, is_automatable = true,
+        value_quantum = 0.5, value_string = "24 dB/oct" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev)
+      return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = { name = "FabFilter Saturn 2", protocol = "VST", path = "/P/Saturn2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the slope-bank overlay completes")
+  check(math.abs(new_state.value - 0.75) < 0.000001,
+    "24 dB/oct is remapped by label instead of replayed as 18 dB/oct")
+  check(new_state.value ~= 0.5, "the old normalized value must not select 18 dB/oct")
+end
+
+section("up_swap writes a continuous value displayed as an integer")
+do
+  -- An integer-formatted display ("40") can belong to a continuous control, not
+  -- a discrete option bank. The replacement has a far finer quantum, so a
+  -- coincident "40" display must not count as transferred; the saved 0.4 is
+  -- written instead of leaving the replacement's 0.404 in place.
+  local new_state = { value = 0.404 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Level" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return string.format("%.0f", new_state.value * 100) end
+      if key == "value_quantum" then return 0.000001 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Level", value = 0.4, is_automatable = true,
+        value_quantum = 0.01, value_string = "40" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev)
+      return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = { name = "FabFilter Saturn 2", protocol = "VST", path = "/P/Saturn2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the integer-display overlay completes")
+  check(math.abs(new_state.value - 0.4) < 0.000001,
+    "a coincident integer display does not skip the numeric write")
+end
+
+section("up_swap transplants a compatible bag when the replacement mapping is incomplete")
+do
+  -- A complete source snapshot does not guarantee the replacement can restore
+  -- every control: a renamed or non-automatable target control is omitted from
+  -- the name mapping. The compatible ParameterBag must be transplanted so those
+  -- saved values are not lost when the old device is removed.
+  local bag = '<FilterDevicePreset><DeviceSlot>'
+    .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+    .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { { name = "Mix", value = 0.5, is_automatable = true } } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = bag,
+    parameters = {
+      { name = "Mix", value = 0.7, is_automatable = true },
+      { name = "Gain", value = 0.3, is_automatable = true },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-with-parameters",
+    "an unmappable replacement control keeps the compatible direct transplant")
+  check(new_dev.active_preset_data == bag, "the unmapped control's saved value is preserved")
+end
+
+section("up_swap remaps zero-quantum fractional option labels")
+do
+  -- Musical-time fractions ("1/4") carry no letters and the source may report
+  -- value_quantum = 0. In a three-to-five-option sync bank, replaying 0.5 would
+  -- select 1/2 instead of remapping the saved 1/4 to 0.25.
+  local new_state = { value = 0 }
+  local labels = { "1/8", "1/4", "1/2", "1/1", "2/1" }
+  local last = #labels - 1
+  local function label_for(current)
+    local index = math.floor(current * last + 0.5)
+    return labels[index + 1] or "?"
+  end
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Sync" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return label_for(new_state.value) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * last + 0.5) / last
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Sync", value = 0.5, is_automatable = true,
+        value_quantum = 0, value_string = "1/4" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the fractional option overlay completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "1/4 is remapped to the new bank's index instead of replayed as 1/2")
+end
+
+section("up_swap treats non-finite displays as numeric")
+do
+  -- "-inf dB" and its replacement "-∞ dB" are numeric values, not option
+  -- names. If label lookup runs it never matches and the saved minimum is
+  -- rejected, leaving the replacement audible.
+  local new_state = { value = 0.5 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Gain" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then
+        return new_state.value < 0.5 and "-∞ dB" or "0 dB"
+      end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Gain", value = 0, is_automatable = true,
+        value_quantum = 0, value_string = "-inf dB" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the non-finite overlay completes")
+  check(math.abs(new_state.value - 0) < 0.000001,
+    "the saved non-finite minimum is written instead of being rejected")
+end
+
+section("up_swap does not trust display equality on a zero-quantum continuous target")
+do
+  -- An integer-formatted continuous display ("40") can match while the saved
+  -- value is 0.4 and the replacement sits at 0.404. A zero-quantum target must
+  -- be confirmed as an option bank before display equality can skip the write.
+  local new_state = { value = 0.404 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mix" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return string.format("%.0f", new_state.value * 100) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Mix", value = 0.4, is_automatable = true,
+        value_quantum = 0.01, value_string = "40" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the zero-quantum overlay completes")
+  check(math.abs(new_state.value - 0.4) < 0.000001,
+    "the saved continuous value is written despite the matching integer display")
+end
+
+section("up_swap keeps equal-quantum measurements numeric")
+do
+  -- Source and replacement both have 0.01 steps, so numeric transfer is safe.
+  -- The replacement formats the same value differently ("40.0 Hz" vs "40 Hz");
+  -- label lookup would reject it and lose the saved setting.
+  local new_state = { value = 0.5 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Cutoff" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return string.format("%.1f Hz", new_state.value * 100) end
+      if key == "value_quantum" then return 0.01 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Cutoff", value = 0.4, is_automatable = true,
+        value_quantum = 0.01, value_string = "40 Hz" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the equal-quantum overlay completes")
+  check(math.abs(new_state.value - 0.4) < 0.000001,
+    "the measurement is transferred numerically despite the display difference")
+end
+
+section("up_swap still remaps discrete unit banks with changed quanta")
+do
+  -- "24 dB/oct" is a discrete option, not a continuous measurement. When the
+  -- bank grows from five to six options, label lookup must still remap it.
+  local new_state = { value = 0 }
+  local labels = { "6 dB/oct", "12 dB/oct", "24 dB/oct", "36 dB/oct", "48 dB/oct", "96 dB/oct" }
+  local last = #labels - 1
+  local function label_for(current)
+    local index = math.floor(current * last + 0.5)
+    return labels[index + 1] or "?"
+  end
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Slope" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return label_for(new_state.value) end
+      if key == "value_quantum" then return 0.2 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * last + 0.5) / last
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Slope", value = 0.5, is_automatable = true,
+        value_quantum = 0.25, value_string = "24 dB/oct" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the unit-bank overlay completes")
+  check(math.abs(new_state.value - 0.4) < 0.000001,
+    "24 dB/oct is remapped to the new bank's index")
+end
+
+section("up_swap remaps zero-quantum numeric option banks")
+do
+  -- Numeric-only enums can report value_quantum = 0 on both sides. Changing
+  -- [1, 2, 4] to [1, 2, 4, 8, 16] must remap the saved 2 to 0.25, not replay
+  -- 0.5 (4).
+  local new_state = { value = 0 }
+  local labels = { "1", "2", "4", "8", "16" }
+  local last = #labels - 1
+  local function label_for(current)
+    local index = math.floor(current * last + 0.5)
+    return labels[index + 1] or "?"
+  end
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mode" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return label_for(new_state.value) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * last + 0.5) / last
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Mode", value = 0.5, is_automatable = true,
+        value_quantum = 0, value_string = "2" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the zero-quantum numeric bank completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "2 is remapped to the new bank's index instead of replayed as 4")
+end
+
+section("up_swap restores a coarse continuous display instead of skipping it")
+do
+  -- A zero-quantum continuous control displaying round(value * 10) has only
+  -- eleven labels, but it is not an option bank. Equal displays ("4") must not
+  -- skip the write: the saved 0.4 is restored, not left at 0.44.
+  local new_state = { value = 0.44 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Level" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return string.format("%.0f", new_state.value * 10) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Level", value = 0.4, is_automatable = true,
+        value_quantum = 0.01, value_string = "4" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the coarse-display overlay completes")
+  check(math.abs(new_state.value - 0.4) < 0.01,
+    "the saved continuous value is restored instead of leaving the coincident display")
+end
+
+section("up_swap remaps reordered equal-quantum option banks")
+do
+  local function run_bank(old_label, new_labels, quantum)
+    local new_state = { value = 0 }
+    local last = #new_labels - 1
+    local function new_label_for(current)
+      local index = math.floor(current * last + 0.5)
+      return new_labels[index + 1] or "?"
+    end
+    local new_param = setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Mode" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return new_state.value end
+        if key == "value_string" then return new_label_for(new_state.value) end
+        if key == "value_quantum" then return quantum end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          new_state.value = math.floor(new_value * last + 0.5) / last
+        else
+          error("read-only " .. key)
+        end
+      end,
+    })
+    local new_dev = { is_active = true, active_preset_data = "", presets = {},
+      parameters = { new_param } }
+    local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+        .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+        .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+      parameters = {
+        { name = "Mode", value = 0.5, is_automatable = true,
+          value_quantum = quantum, value_string = old_label },
+      } }
+    local track = {
+      devices = { [1] = {}, [2] = old_dev },
+      insert_device_at = function(self, _path, index)
+        table.insert(self.devices, index, new_dev); return new_dev
+      end,
+      delete_device_at = function(self, index) table.remove(self.devices, index) end,
+    }
+    local song = { tracks = { track }, instruments = {},
+      automation = function() return { is_automated = false } end }
+    local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+      device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+      analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+    local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+    candidate.path = "/P/Saturn2.vst"
+    local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+    return ok, res, new_state
+  end
+
+  local ok_num, res_num, state_num = run_bank("2", { "1", "4", "2" }, 0.5)
+  check(ok_num and res_num and res_num.status == "upgraded-parameter-synth",
+    "the reordered numeric bank completes")
+  check(math.abs(state_num.value - 1.0) < 0.000001,
+    "the numeric 2 maps to its new position instead of replaying the old index")
+
+  local ok_frac, res_frac, state_frac = run_bank("1/4", { "1/8", "1/2", "1/4" }, 0.5)
+  check(ok_frac and res_frac and res_frac.status == "upgraded-parameter-synth",
+    "the reordered fractional bank completes")
+  check(math.abs(state_frac.value - 1.0) < 0.000001,
+    "the fractional 1/4 maps to its new position instead of replaying the old index")
+end
+
+section("up_swap remaps decimal option banks with coarse quanta")
+do
+  -- Decimal labels can be discrete options ("1.0", "1.5", "2.0"). When the
+  -- source and replacement report coarse quanta, the decimal exclusion must not
+  -- send them down the numeric path.
+  local new_state = { value = 0 }
+  local labels = { "1.0", "1.5", "2.0", "4.0", "8.0" }
+  local last = #labels - 1
+  local function label_for(current)
+    local index = math.floor(current * last + 0.5)
+    return labels[index + 1] or "?"
+  end
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mode" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return label_for(new_state.value) end
+      if key == "value_quantum" then return 0.25 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * last + 0.5) / last
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Mode", value = 0.5, is_automatable = true,
+        value_quantum = 0.5, value_string = "1.5" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the decimal bank overlay completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "1.5 is remapped to the new bank's index instead of replayed as 2.0")
+end
+
+section("up_swap keeps the saved value in a coarse positive-quantum display")
+do
+  -- A step walk finds the first value sharing a coarse display (about 0.35 for
+  -- "4"). The saved 0.4 must be tried first and retained when its replacement
+  -- display matches.
+  local new_state = { value = 0.4 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Level" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return string.format("%.0f", new_state.value * 10) end
+      if key == "value_quantum" then return 0.01 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Level", value = 0.4, is_automatable = true,
+        value_quantum = 0.01, value_string = "4" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the coarse-display overlay completes")
+  check(math.abs(new_state.value - 0.4) < 0.000001,
+    "the saved value is retained instead of the first matching display value")
+end
+
+section("up_swap accepts zero-quantum measurements with different formatting")
+do
+  -- Both sides report quantum 0. The saved 0.4 displays "40 Hz"; the replacement
+  -- formats the same value as "40.0 Hz". Numeric equivalence must allow the
+  -- write instead of rejecting the setting.
+  local new_state = { value = 0.5, writes = 0 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Cutoff" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return string.format("%.1f Hz", new_state.value * 100) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.writes = new_state.writes + 1
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Cutoff", value = 0.4, is_automatable = true,
+        value_quantum = 0, value_string = "40 Hz" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the zero-quantum measurement completes")
+  check(math.abs(new_state.value - 0.4) < 0.000001,
+    "the measurement is transferred numerically despite the display formatting")
+  check(new_state.writes < 10,
+    "numeric equivalence is checked before an exhaustive label sweep")
+end
+
+section("up_swap keeps the base option when a discrete bank loses an option")
+do
+  -- Source [1, 2, 4] and replacement [1, 4, 8] share a quantum, but the saved 2
+  -- is gone. Replaying 0.5 would select 4; keep the replacement's base option.
+  local new_state = { value = 0 }
+  local labels = { "1", "4", "8" }
+  local last = #labels - 1
+  local function label_for(current)
+    local index = math.floor(current * last + 0.5)
+    return labels[index + 1] or "?"
+  end
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mode" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return label_for(new_state.value) end
+      if key == "value_quantum" then return 0.5 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * last + 0.5) / last
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_mode = { name = "Mode", value = 0.5, is_automatable = true,
+    value_quantum = 0.5, value_string = "2" }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_mode } }
+  local automation = { is_automated = true, playback_mode = 1 }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, parameter)
+      if parameter == old_mode then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-default",
+    "the removed option keeps the default state instead of replaying an index")
+  check(new_state.value == 0, "the replacement's base option is preserved")
+  check(automation.device_parameter == nil, "the rejected option automation is not rebound")
+  check(res.detail and res.detail:find("automation dropped", 1, true) ~= nil,
+    "the rejected option automation loss is reported")
+end
+
+section("up_swap remaps non-ASCII option labels")
+do
+  -- %a is ASCII-only; a localized option name has no ASCII letters but is
+  -- still an enum label and must be remapped when the bank grows.
+  local new_state = { value = 0 }
+  local labels = { "クリーン", "テープ", "オールド", "アンプ", "サチュレーション" }
+  local last = #labels - 1
+  local function label_for(current)
+    local index = math.floor(current * last + 0.5)
+    return labels[index + 1] or "?"
+  end
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Style" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return label_for(new_state.value) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * last + 0.5) / last
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Style", value = 0.5, is_automatable = true,
+        value_quantum = 0, value_string = "テープ" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the localized label overlay completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "the localized option is remapped to the new bank's index")
+end
+
+section("up_swap normalizes equivalent units for zero-quantum controls")
+do
+  -- 1000 Hz and 1.0 kHz are the same measurement. A zero-quantum replacement
+  -- with a read-only display must not reject the saved value because the unit
+  -- scale changed.
+  local new_state = { value = 0.5 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Cutoff" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return string.format("%.1f kHz", new_state.value * 2.5) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Cutoff", value = 0.4, is_automatable = true,
+        value_quantum = 0, value_string = "1000 Hz" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the unit-scaled overlay completes")
+  check(math.abs(new_state.value - 0.4) < 0.000001,
+    "the saved value is transferred across compatible unit scales")
+end
+
+section("up_swap drops automation for remapped enum parameters")
+do
+  -- Automation points still carry the old enum indices. Rebinding them would
+  -- replay Old Tape during playback, so the swap must exclude and report them.
+  local new_state = { value = 0 }
+  local labels = {
+    [0] = "Subtle Tube", [1] = "Clean Tube", [2] = "Warm Tube", [3] = "Broken Tube",
+    [4] = "Subtle Tape", [5] = "Clean Tape", [6] = "Warm Tape", [7] = "Old Tape",
+  }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Band 1 Style" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then
+        local index = math.floor(new_state.value * 27 + 0.5)
+        return labels[index] or ("Style " .. tostring(index))
+      end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * 27 + 0.5) / 27
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_style = { name = "Band 1 Style", value = 4 / 15, is_automatable = true,
+    value_quantum = 0, value_string = "Warm Tape" }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_style } }
+  local automation = { is_automated = true, playback_mode = 1 }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, parameter)
+      if parameter == old_style then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the enum overlay completes")
+  check(automation.device_parameter == nil, "the incompatible automation is not rebound")
+  check(res.detail and res.detail:find("automation dropped", 1, true) ~= nil,
+    "the automation loss is reported")
+end
+
+section("up_swap mutes the replacement while probing labels")
+do
+  local state = { value = 0, saw_active = false }
+  local new_dev = { is_active = true, active_preset_data = "", presets = {}, parameters = {} }
+  local labels = {
+    [0] = "Subtle Tube", [1] = "Clean Tube", [2] = "Warm Tube", [3] = "Broken Tube",
+    [4] = "Subtle Tape", [5] = "Clean Tape", [6] = "Warm Tape", [7] = "Old Tape",
+  }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Band 1 Style" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return state.value end
+      if key == "value_string" then
+        if new_dev.is_active ~= false then state.saw_active = true end
+        local index = math.floor(state.value * 27 + 0.5)
+        return labels[index] or ("Style " .. tostring(index))
+      end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        state.value = math.floor(new_value * 27 + 0.5) / 27
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  new_dev.parameters = { new_param }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Band 1 Style", value = 4 / 15, is_automatable = true,
+        value_quantum = 0, value_string = "Warm Tape" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the probe overlay completes")
+  check(state.saw_active == false, "the replacement is muted during label probing")
+  check(new_dev.is_active == true, "the original enabled state is restored afterwards")
+end
+
+section("up_swap preserves automation for a continuous bounded-quantum control")
+do
+  -- A bounded quantum is not enough to classify a control as an enum. A cutoff
+  -- whose resolution changes from 0.01 to 0.005 and whose display is formatted
+  -- differently still keeps its automation.
+  local new_state = { value = 0.5 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Cutoff" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return string.format("%.1f Hz", new_state.value * 100) end
+      if key == "value_quantum" then return 0.005 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_cutoff = { name = "Cutoff", value = 0.4, is_automatable = true,
+    value_quantum = 0.01, value_string = "40 Hz" }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_cutoff } }
+  local automation = { is_automated = true, playback_mode = 1,
+    points = { { time = 0, value = 0.4 } } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, parameter)
+      if parameter == old_cutoff then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the cutoff overlay completes")
+  check(automation.device_parameter == new_param, "the cutoff automation is rebound")
+  check(not res.detail or not res.detail:find("automation dropped", 1, true),
+    "the continuous automation is not reported as dropped")
+end
+
+section("up_swap returns enum exclusions when every label is rejected")
+do
+  -- If all mapped enum labels are rejected, the failure path must still hand
+  -- the exclusion set to the caller so unsafe automation is not restored.
+  local new_state = { value = 0 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Band 1 Style" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return "Other" end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_style = { name = "Band 1 Style", value = 4 / 15, is_automatable = true,
+    value_quantum = 0, value_string = "Warm Tape" }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_style } }
+  local automation = { is_automated = true, playback_mode = 1 }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, parameter)
+      if parameter == old_style then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-default", "the rejected-label upgrade defaults")
+  check(automation.device_parameter == nil, "the unsafe automation is not rebound")
+  check(res.detail and res.detail:find("automation dropped", 1, true) ~= nil,
+    "the automation loss is reported on the failure path")
+end
+
+section("up_swap normalizes a Unicode minus in numeric displays")
+do
+  -- U+2212 MINUS SIGN is not the ASCII hyphen. A read-only replacement
+  -- displaying "-3.0 dB" must still receive the saved "−3.0 dB" value.
+  local new_state = { value = 0.5 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Gain" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return "-3.0 dB" end
+      if key == "value_quantum" then return 0.01 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Gain", value = 0.4, is_automatable = true,
+        value_quantum = 0.01, value_string = "−3.0 dB" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the Unicode-minus overlay completes")
+  check(math.abs(new_state.value - 0.4) < 0.000001,
+    "the Unicode-minus measurement is transferred numerically")
+end
+
+section("up_swap accepts rounded continuous measurements")
+do
+  -- The saved 440.5 Hz is displayed as 441 Hz by the replacement. Half a
+  -- display step must count as the same measurement, without a 256-sample sweep.
+  local new_state = { value = 0.5, writes = 0 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Cutoff" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then
+        return string.format("%d Hz", math.floor(new_state.value * 1000 + 0.5))
+      end
+      if key == "value_quantum" then return 0.01 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.writes = new_state.writes + 1
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Cutoff", value = 0.4405, is_automatable = true,
+        value_quantum = 0.01, value_string = "440.5 Hz" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the rounded overlay completes")
+  check(math.abs(new_state.value - 0.4405) < 0.000001,
+    "the rounded continuous measurement is transferred")
+  check(new_state.writes < 10, "the rounded match does not trigger a label sweep")
+end
+
+section("up_swap remaps colon-separated ratio option labels")
+do
+  local new_state = { value = 0 }
+  local labels = { "1:1", "2:1", "4:1", "8:1", "20:1" }
+  local last = #labels - 1
+  local function label_for(current)
+    local index = math.floor(current * last + 0.5)
+    return labels[index + 1] or "?"
+  end
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Ratio" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return label_for(new_state.value) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * last + 0.5) / last
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Ratio", value = 0.5, is_automatable = true,
+        value_quantum = 0, value_string = "2:1", value_min = 0, value_max = 1 },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the ratio overlay completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "2:1 is remapped to the new bank's index")
+end
+
+section("up_swap does not round option labels during bank expansion")
+do
+  -- A preferred 0.5 displays "2.5" in the expanded bank. Display rounding must
+  -- not accept that as the saved "2"; exact lookup finds 2 at 0.25.
+  local new_state = { value = 0 }
+  local labels = { "1", "2", "2.5", "4", "8" }
+  local last = #labels - 1
+  local function label_for(current)
+    local index = math.floor(current * last + 0.5)
+    return labels[index + 1] or "?"
+  end
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mode" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return label_for(new_state.value) end
+      if key == "value_quantum" then return 0.25 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * last + 0.5) / last
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Mode", value = 0.5, is_automatable = true,
+        value_quantum = 0.5, value_string = "2", value_min = 0, value_max = 1 },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the expanded-bank overlay completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "2 is remapped exactly instead of accepting the rounded 2.5")
+end
+
+section("up_swap drops automation when a zero-quantum bank expands")
+do
+  -- The current first option stays at index 0, so neither the quantum nor the
+  -- current-value comparison flags the bank. The label profile detects that the
+  -- automated 0.5 now means 4 instead of 2.
+  local new_state = { value = 0 }
+  local labels = { "1", "2", "4", "8", "16" }
+  local last = #labels - 1
+  local function label_for(current)
+    local index = math.floor(current * last + 0.5)
+    return labels[index + 1] or "?"
+  end
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mode" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return label_for(new_state.value) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * last + 0.5) / last
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_mode = { name = "Mode", value = 0, is_automatable = true,
+    value_quantum = 0, value_string = "1", value_min = 0, value_max = 1 }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_mode } }
+  local automation = { is_automated = true, playback_mode = 1,
+    points = { { time = 0, value = 0.5 } } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, parameter)
+      if parameter == old_mode then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the zero-quantum expansion completes")
+  check(automation.device_parameter == nil, "the incompatible automation is not rebound")
+  check(res.detail and res.detail:find("automation dropped", 1, true) ~= nil,
+    "the expanded-bank automation loss is reported")
+end
+
+section("up_swap validates automated values against reordered options")
+do
+  -- Eight evenly spaced samples miss a swap of options 6 and 7. The captured
+  -- automation point at 6/27 must still detect that its label changed.
+  local function make_labels(swap)
+    local labels = {}
+    for index = 0, 27 do labels[index] = "Option " .. index end
+    if swap then labels[6], labels[7] = labels[7], labels[6] end
+    return labels
+  end
+  local old_labels = make_labels(true)
+  local new_labels = make_labels(false)
+  local function parameter(labels)
+    local state = { value = 0 }
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Style" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then
+          local index = math.floor(state.value * 27 + 0.5)
+          return labels[index]
+        end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value * 27 + 0.5) / 27
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+  local new_param = parameter(new_labels)
+  local old_param = parameter(old_labels)
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local automation = { is_automated = true, playback_mode = 1,
+    points = { { time = 0, value = 6 / 27 } } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the reordered-option overlay completes")
+  check(automation.device_parameter == nil, "the reordered automation is not rebound")
+  check(res.detail and res.detail:find("automation dropped", 1, true) ~= nil,
+    "the reordered automation loss is reported")
+end
+
+section("up_swap skips probing for an up-to-date candidate")
+do
+  local probed = false
+  local old_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mode" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return 0 end
+      if key == "value_string" then probed = true; return "1" end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+  })
+  local old_dev = { is_active = true, presets = {}, active_preset_data = "", parameters = { old_param } }
+  local track = { devices = { [1] = {}, [2] = old_dev } }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = true, points = { { time = 0, value = 0.5 } } } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Same.vst", device_name = "VST: Same",
+    analysis = analyze("VST: Same", "/P/Same.vst", "VST") }
+  local candidate = analyze("VST: Same", "/P/Same.vst", "VST")
+  candidate.path = "/P/Same.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "up-to-date", "the up-to-date candidate is skipped")
+  check(probed == false, "no source parameter is probed for a no-op swap")
+end
+
+section("up_swap mutes the source while capturing automation labels")
+do
+  local saw_muted = false
+  local old_dev
+  local old_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mode" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return 0 end
+      if key == "value_string" then
+        if old_dev.is_active == false then saw_muted = true end
+        return "1"
+      end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+  })
+  old_dev = { is_active = true, presets = {}, active_preset_data = "", parameters = { old_param } }
+  local new_param = { name = "Mode", is_automatable = true, value = 0,
+    value_string = "1", value_quantum = 0, value_min = 0, value_max = 1 }
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local automation = { is_automated = true, playback_mode = 1,
+    points = { { time = 0, value = 0.5 } } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok, "the source-muting swap completes")
+  check(saw_muted == true, "the source is muted while capturing automation labels")
+  check(old_dev.is_active == true, "the source enabled state is restored")
+end
+
+section("up_swap drops automation when point labels are unavailable")
+do
+  local old_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mode" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return 0 end
+      if key == "value_string" then return nil end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+  })
+  local old_dev = { is_active = true, presets = {}, active_preset_data = "", parameters = { old_param } }
+  local new_param = { name = "Mode", is_automatable = true, value = 0,
+    value_string = "1", value_quantum = 0, value_min = 0, value_max = 1 }
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local automation = { is_automated = true, playback_mode = 1,
+    points = { { time = 0, value = 0.5 } } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res, "the unavailable-label swap completes")
+  check(automation.device_parameter == nil, "the unverifiable automation is not rebound")
+  check(res.detail and res.detail:find("automation dropped", 1, true) ~= nil,
+    "the unverifiable automation loss is reported")
+end
+
+section("up_swap remaps zero-quantum decimal option banks")
+do
+  local new_state = { value = 0 }
+  local labels = { "1.0", "1.5", "2.0", "4.0", "8.0" }
+  local last = #labels - 1
+  local function label_for(current)
+    local index = math.floor(current * last + 0.5)
+    return labels[index + 1] or "?"
+  end
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mode" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return label_for(new_state.value) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * last + 0.5) / last
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Mode", value = 0.5, is_automatable = true,
+        value_quantum = 0, value_string = "1.5", value_min = 0, value_max = 1 },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the decimal zero-quantum overlay completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "1.5 is remapped to the new bank's index")
+end
+
+section("up_swap validates interpolated automation spans")
+do
+  local function make_param(labels)
+    local state = { value = 0 }
+    local last = #labels - 1
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Mode" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then
+          local index = math.floor(state.value * last + 0.5)
+          return labels[index + 1] or "?"
+        end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value * last + 0.5) / last
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+  local new_param = make_param({ "A", "X", "C" })
+  local old_param = make_param({ "A", "B", "C" })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local automation = { is_automated = true, playback_mode = 2,
+    points = { { time = 0, value = 0 }, { time = 1, value = 1 } } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res, "the interpolated-span swap completes")
+  check(automation.device_parameter == nil, "the interpolated incompatibility is detected")
+  check(res.detail and res.detail:find("automation dropped", 1, true) ~= nil,
+    "the interpolated automation loss is reported")
+end
+
+section("up_swap excludes linked automation it cannot validate")
+do
+  local old_param = { name = "Mode", value = 0, is_automatable = true,
+    value_string = "A", value_quantum = 0, value_min = 0, value_max = 1 }
+  local new_param = { name = "Mode", value = 0, is_automatable = true,
+    value_string = "A", value_quantum = 0, value_min = 0, value_max = 1 }
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local automation = { is_automated = true, playback_mode = 1,
+    linked_device_parameter = { name = "LFO" } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res, "the linked-automation swap completes")
+  check(automation.device_parameter == nil, "the unverifiable link is not rebound")
+  check(res.detail and res.detail:find("automation dropped", 1, true) ~= nil,
+    "the linked automation loss is reported")
+end
+
+section("up_swap caps automation compatibility probes")
+do
+  local old_param = { name = "Mode", value = 0, is_automatable = true,
+    value_string = "A", value_quantum = 0, value_min = 0, value_max = 1 }
+  local new_param = { name = "Mode", value = 0, is_automatable = true,
+    value_string = "A", value_quantum = 0, value_min = 0, value_max = 1 }
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local points = {}
+  for index = 0, 99 do
+    points[#points + 1] = { time = index, value = index / 99 }
+  end
+  local automation = { is_automated = true, playback_mode = 1, points = points }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res, "the dense-automation swap completes")
+  check(automation.device_parameter == nil, "the over-budget automation is not rebound")
+  check(res.detail and res.detail:find("automation dropped", 1, true) ~= nil,
+    "the over-budget automation loss is reported")
+end
+
+section("up_swap does not interpolate point-mode automation")
+do
+  local function make_param(labels)
+    local state = { value = 0 }
+    local last = #labels - 1
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Mode" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then
+          local index = math.floor(state.value * last + 0.5)
+          return labels[index + 1] or "?"
+        end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value * last + 0.5) / last
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+  local new_param = make_param({ "A", "X", "C" })
+  local old_param = make_param({ "A", "B", "C" })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local automation = { is_automated = true, playback_mode = 1,
+    points = { { time = 0, value = 0 }, { time = 1, value = 1 } } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the point-mode overlay completes")
+  check(automation.device_parameter == new_param, "point-mode automation is preserved")
+  check(not res.detail or not res.detail:find("automation dropped", 1, true),
+    "point-mode automation is not reported as dropped")
+end
+
+section("up_swap treats infinity spellings as equivalent automation values")
+do
+  local new_state = { value = 0.5 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Gain" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then
+        return new_state.value == 0 and "-∞ dB" or "0 dB"
+      end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_param = { name = "Gain", value = 0, is_automatable = true,
+    value_string = "-inf dB", value_quantum = 0, value_min = 0, value_max = 1 }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local automation = { is_automated = true, playback_mode = 1,
+    points = { { time = 0, value = 0 } } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the infinity overlay completes")
+  check(automation.device_parameter == new_param, "the infinity automation is preserved")
+  check(not res.detail or not res.detail:find("automation dropped", 1, true),
+    "the infinity automation is not reported as dropped")
+end
+
+section("up_swap validates options traversed by an interpolated ramp")
+do
+  local function make_labels(swap)
+    local labels = {}
+    for index = 0, 27 do labels[index] = "Option " .. index end
+    if swap then labels[5], labels[6] = labels[6], labels[5] end
+    return labels
+  end
+  local old_labels = make_labels(true)
+  local new_labels = make_labels(false)
+  local function parameter(labels)
+    local state = { value = 0 }
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Style" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then
+          local index = math.floor(state.value * 27 + 0.5)
+          return labels[index]
+        end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value * 27 + 0.5) / 27
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+  local new_param = parameter(new_labels)
+  local old_param = parameter(old_labels)
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local automation = { is_automated = true, playback_mode = 2,
+    points = { { time = 0, value = 0 }, { time = 1, value = 1 } } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the ramp overlay completes")
+  check(automation.device_parameter == nil, "the mid-ramp option reorder is detected")
+  check(res.detail and res.detail:find("automation dropped", 1, true) ~= nil,
+    "the mid-ramp automation loss is reported")
+end
+
+section("up_swap accepts zero-quantum unitless rounding")
+do
+  local new_state = { value = 0.5 }
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Level" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return string.format("%.2f", new_state.value) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = new_value
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_param = { name = "Level", value = 0.413, is_automatable = true,
+    value_string = "0.413", value_quantum = 0, value_min = 0, value_max = 1 }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local automation = { is_automated = true, playback_mode = 1,
+    points = { { time = 0, value = 0.413 } } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the unitless rounding overlay completes")
+  check(math.abs(new_state.value - 0.413) < 0.000001,
+    "the unitless continuous value is transferred across display rounding")
+  check(automation.device_parameter == new_param, "the unitless automation is preserved")
+end
+
+section("up_swap preserves a flat interpolated envelope")
+do
+  local function make_param(labels)
+    local state = { value = 0 }
+    local last = #labels - 1
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Mode" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then
+          local index = math.floor(state.value * last + 0.5)
+          return labels[index + 1] or "?"
+        end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value * last + 0.5) / last
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+  local new_param = make_param({ "A", "B", "C" })
+  local old_param = make_param({ "A", "B", "C" })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local points = {}
+  for index = 0, 9 do
+    points[#points + 1] = { time = index, value = 0.4 }
+  end
+  local automation = { is_automated = true, playback_mode = 2, points = points }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the flat-envelope overlay completes")
+  check(automation.device_parameter == new_param, "the flat envelope is preserved")
+  check(not res.detail or not res.detail:find("automation dropped", 1, true),
+    "the flat envelope is not reported as dropped")
+end
+
+section("up_swap rejects a large bank whose coverage cannot be established")
+do
+  local function make_labels(swap)
+    local labels = {}
+    for index = 0, 127 do labels[index] = "Option " .. index end
+    if swap then labels[1], labels[3] = labels[3], labels[1] end
+    return labels
+  end
+  local old_labels = make_labels(true)
+  local new_labels = make_labels(false)
+  local function make_param(labels)
+    local state = { value = 0 }
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Style" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then
+          local index = math.floor(state.value * 127 + 0.5)
+          return labels[index]
+        end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value * 127 + 0.5) / 127
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+  local new_param = make_param(new_labels)
+  local old_param = make_param(old_labels)
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local automation = { is_automated = true, playback_mode = 2,
+    points = { { time = 0, value = 0 }, { time = 1, value = 1 } } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the large-bank overlay completes")
+  check(automation.device_parameter == nil, "the insufficient-coverage automation is not rebound")
+  check(res.detail and res.detail:find("automation dropped", 1, true) ~= nil,
+    "the insufficient-coverage loss is reported")
+end
+
+section("up_swap rejects a zero-quantum removed option")
+do
+  -- Zero quantum does not prove the target is continuous. When the saved 2 is
+  -- gone from [1, 2, 4] -> [1, 4, 8], numeric fallback would select 4; keep the
+  -- base option instead.
+  local new_state = { value = 0 }
+  local labels = { "1", "4", "8" }
+  local last = #labels - 1
+  local function label_for(current)
+    local index = math.floor(current * last + 0.5)
+    return labels[index + 1] or "?"
+  end
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mode" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return label_for(new_state.value) end
+      if key == "value_quantum" then return 0 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * last + 0.5) / last
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Mode", value = 0.5, is_automatable = true,
+        value_quantum = 0, value_string = "2", value_min = 0, value_max = 1 },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-default",
+    "the zero-quantum removed option keeps the default state")
+  check(new_state.value == 0, "the replacement's base option is preserved")
+end
+
+section("up_swap does not fall back to a fine-quantum numeric bank")
+do
+  -- A 512-option bank has a fine quantum, but it is not continuous. Lookup
+  -- exceeds the probe budget, so the saved 2 must keep the base option rather
+  -- than replay 0.5 and select 257.
+  local new_state = { value = 0 }
+  local function label_for(current)
+    local index = math.floor(current * 511 + 0.5)
+    return tostring(index + 1)
+  end
+  local new_param = setmetatable({}, {
+    __index = function(_, key)
+      if key == "name" then return "Mode" end
+      if key == "is_automatable" then return true end
+      if key == "value" then return new_state.value end
+      if key == "value_string" then return label_for(new_state.value) end
+      if key == "value_quantum" then return 1 / 511 end
+      if key == "value_min" then return 0 end
+      if key == "value_max" then return 1 end
+      return nil
+    end,
+    __newindex = function(_, key, new_value)
+      if key == "value" then
+        new_state.value = math.floor(new_value * 511 + 0.5) / 511
+      else
+        error("read-only " .. key)
+      end
+    end,
+  })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Mode", value = 0.5, is_automatable = true,
+        value_quantum = 0.5, value_string = "2", value_min = 0, value_max = 1 },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-default",
+    "the over-budget numeric bank keeps the default state")
+  check(new_state.value == 0, "the replacement's base option is preserved")
+end
+
+section("up_swap excludes flat spans from interpolation probing")
+do
+  -- Nine flat spans plus one changing span should allocate probes only to the
+  -- changing span, preserving the compatible envelope.
+  local function make_param(labels)
+    local state = { value = 0 }
+    local last = #labels - 1
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Mode" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then
+          local index = math.floor(state.value * last + 0.5)
+          return labels[index + 1] or "?"
+        end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value * last + 0.5) / last
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+  local new_param = make_param({ "A", "B", "C" })
+  local old_param = make_param({ "A", "B", "C" })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local points = {}
+  for index = 0, 8 do
+    points[#points + 1] = { time = index, value = 0.4 }
+  end
+  points[#points + 1] = { time = 9, value = 0.5 }
+  local automation = { is_automated = true, playback_mode = 2, points = points }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the mixed-flat envelope completes")
+  check(automation.device_parameter == new_param, "the mixed-flat envelope is preserved")
+  check(not res.detail or not res.detail:find("automation dropped", 1, true),
+    "the mixed-flat envelope is not reported as dropped")
+end
+
+section("up_swap deduplicates repeated ramp intervals")
+do
+  local function make_param(labels)
+    local state = { value = 0 }
+    local last = #labels - 1
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Mode" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then
+          local index = math.floor(state.value * last + 0.5)
+          return labels[index + 1] or "?"
+        end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value * last + 0.5) / last
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+  local new_param = make_param({ "A", "B", "C" })
+  local old_param = make_param({ "A", "B", "C" })
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local points = {}
+  for index = 0, 9 do
+    points[#points + 1] = { time = index, value = (index % 2 == 0) and 0 or 1 }
+  end
+  local automation = { is_automated = true, playback_mode = 2, points = points }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the repeated-ramp overlay completes")
+  check(automation.device_parameter == new_param, "the repeated-ramp envelope is preserved")
+  check(not res.detail or not res.detail:find("automation dropped", 1, true),
+    "the repeated-ramp envelope is not reported as dropped")
+end
+
+section("up_swap allows a point-mode envelope with 64 distinct labels")
+do
+  local function make_param(labels)
+    local state = { value = 0 }
+    local last = #labels - 1
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Mode" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then
+          local index = math.floor(state.value * last + 0.5)
+          return labels[index + 1] or "?"
+        end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value * last + 0.5) / last
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+  local labels = {}
+  for index = 0, 63 do labels[#labels + 1] = "Option " .. index end
+  local new_param = make_param(labels)
+  local old_param = make_param(labels)
+  local new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { new_param } }
+  local old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { old_param } }
+  local points = {}
+  for index = 0, 63 do
+    points[#points + 1] = { time = index, value = index / 63 }
+  end
+  local automation = { is_automated = true, playback_mode = 1, points = points }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev); return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = {
+    tracks = { track }, instruments = {},
+    automation = function(_, value)
+      if value == old_param then return automation end
+      return { is_automated = false }
+    end,
+  }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local candidate = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2.vst", "VST")
+  candidate.path = "/P/Saturn2.vst"
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the 64-label point envelope completes")
+  check(automation.device_parameter == new_param, "the 64-label point envelope is preserved")
+  check(not res.detail or not res.detail:find("automation dropped", 1, true),
+    "the 64-label point envelope is not reported as dropped")
+end
