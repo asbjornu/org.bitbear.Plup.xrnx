@@ -148,12 +148,20 @@ end
 -- automatable parameters are captured for track effects; instrument plugins
 -- expose no meaningful `is_automatable` flag (Renoise documents it as invalid
 -- for instrument devices), so all named instrument parameters are captured.
+-- The quantum and display string are captured too: enumerated parameters (e.g.
+-- Saturn's per-band distortion style) can change their option count between
+-- major versions, and replaying the old normalized value would select a
+-- different option.
 local function snapshot_parameters(device, is_instrument)
   local captured = {}
-  if not device then return captured end
+  if not device then return captured, true end
   local ok, parameters = pcall(function() return device.parameters end)
-  if not ok or not parameters then return captured end
+  if not ok or not parameters then return captured, false end
+  local total = 0
+  local seen = {}
+  local unique = true
   for _, parameter in ipairs(parameters) do
+    total = total + 1
     local usable = true
     if not is_instrument then
       local ok_auto, is_automatable = pcall(function() return parameter.is_automatable end)
@@ -166,11 +174,25 @@ local function snapshot_parameters(device, is_instrument)
       -- matches strictly by (non-empty) name, so nameless entries can never be
       -- re-applied and would only add noise/work.
       if ok_value and ok_name and type(name) == "string" and name ~= "" then
-        captured[#captured + 1] = { name = name, value = value }
+        if seen[name] then unique = false end
+        seen[name] = true
+        local ok_quantum, quantum = pcall(function() return parameter.value_quantum end)
+        local ok_string, value_string = pcall(function() return parameter.value_string end)
+        captured[#captured + 1] = {
+          name = name,
+          value = value,
+          value_quantum = (ok_quantum and type(quantum) == "number") and quantum or nil,
+          value_string = (ok_string and type(value_string) == "string") and value_string or nil,
+        }
       end
     end
   end
-  return captured
+  -- A bag transplant preserves parameters the name-based overlay cannot
+  -- capture (non-automatable or nameless controls), so callers need to know
+  -- whether the snapshot is complete. Duplicate names are treated as
+  -- incomplete: the name-keyed mapping restores only the first of them, so a
+  -- "complete" snapshot could otherwise silently drop the rest.
+  return captured, total == #captured and unique
 end
 
 -- Parameter names are not guaranteed to survive a VST2 -> VST3 port verbatim:
@@ -255,6 +277,23 @@ local function build_parameter_mapping(parameters, old_parameters, is_instrument
   return mapping
 end
 
+-- True when every captured source parameter has a writable one-to-one target on
+-- the replacement. A complete source snapshot can still omit replacement
+-- controls (a renamed or non-automatable target), in which case the name-based
+-- overlay would report success while dropping the unmatched saved values; the
+-- compatible ParameterBag transplant preserves them instead.
+local function replacement_mapping_complete(new_device, old_parameters, is_instrument)
+  if not old_parameters or #old_parameters == 0 then return false end
+  local ok_parameters, parameters = pcall(function() return new_device.parameters end)
+  if not ok_parameters or not parameters then return false end
+  local mapping = build_parameter_mapping(parameters, old_parameters, is_instrument)
+  local mapped = 0
+  for index = 1, #old_parameters do
+    if mapping[index] then mapped = mapped + 1 end
+  end
+  return mapped == #old_parameters
+end
+
 -- Compare parameter values with a tolerance derived from the parameter's own
 -- range/quantum. VST2 and VST3 builds can expose the same setting with slightly
 -- different float precision (0.30000001192092896 vs 0.3), which must count as
@@ -277,31 +316,205 @@ local function parameter_values_equal(left, right, parameter)
   return math.abs(left - right) <= tolerance
 end
 
+local function trimmed_label(value)
+  if type(value) ~= "string" then return nil end
+  local label = value:match("^%s*(.-)%s*$")
+  if label == "" then return nil end
+  return label
+end
+
+local function labels_equal(left, right)
+  local first = trimmed_label(left)
+  local second = trimmed_label(right)
+  return first ~= nil and second ~= nil and first:lower() == second:lower()
+end
+
+-- Heuristic for a textual enum/mode label such as "Warm Tape", "Off" or "2x".
+-- A continuous parameter formats its value as a number followed by an attached
+-- or whitespace-separated unit ("0.50", "-3.0dB", "0.413ms", "440 Hz",
+-- "100.0%"); those keep their numeric transfer. A digit-bearing option label
+-- ("2x", "16x", "Band 2") has no measurement unit, so it must trigger the label
+-- lookup even when value_quantum is 0 (as some plugin bindings report for
+-- enums). "x" is deliberately treated as an option multiplier, not a unit.
+local function looks_like_enum_label(value)
+  local label = trimmed_label(value)
+  if not label or not label:find("%a") then return false end
+  local unit = label:match("^[%-%+]?%d+%.?%d*%s*([%a%%]+)")
+  if not unit then return true end
+  return unit:lower() == "x"
+end
+
+-- At most 256 plugin reads/writes are performed while looking for a label.
+-- Exhaustive step searches (a tiny reported quantum) and the no-quantum
+-- sampling fallback both stay within this budget so one swap cannot stall
+-- Renoise's script thread.
+local MAX_LABEL_PROBES = 256
+
+-- Decide whether an old parameter is an enumerated option that must be remapped
+-- by display label. The textual heuristic above handles mode names ("Warm Tape")
+-- and digit-bearing options ("2x", "Band 2"). Some option banks label choices
+-- with bare integers ("1", "2", "4") or integer values with a unit
+-- ("24 dB/oct") that carry no textual mode name; the captured quantum reveals
+-- them: a quantum that divides the normalized range into a small, bounded number
+-- of steps is a discrete option bank, whereas a continuous control's tiny
+-- quantum (thousands of steps) or a decimal-formatted numeric label ("0.40",
+-- "0.413ms") is excluded.
+local function is_enum_parameter(parameter)
+  local label = trimmed_label(parameter.value_string)
+  if not label then return false end
+  if looks_like_enum_label(label) then return true end
+  local quantum = parameter.value_quantum
+  if type(quantum) ~= "number" or quantum <= 0 then return false end
+  if (1 / quantum) + 1 > MAX_LABEL_PROBES then return false end
+  -- Accept bare integers and integer-formatted unit labels, but not decimal
+  -- values ("0.40", "0.413ms"), which are continuous controls.
+  return label:match("^[%-%+]?%d+$") ~= nil
+    or label:match("^[%-%+]?%d+%s*[%a]") ~= nil
+end
+
+-- True when a parameter's own quantum reveals a bounded discrete option bank.
+-- Used to decide whether a numeric-only label ("40") can be trusted for display
+-- equality: a fine-grained continuous control (e.g. quantum 1e-6) is not
+-- discrete, so the display match is coincidental and the value must be written.
+local function parameter_is_discrete(parameter)
+  local ok_quantum, quantum = pcall(function() return parameter.value_quantum end)
+  return ok_quantum and type(quantum) == "number" and quantum > 0
+    and (1 / quantum) + 1 <= MAX_LABEL_PROBES
+end
+
+-- The replacement value whose display label matches `wanted`. Enumerated
+-- plugin parameters expose their option name through value_string. Assigning
+-- value_string is not supported by every host binding, so fall back to walking
+-- the parameter's quantized steps and comparing the label at each one.
+local function value_for_label(parameter, wanted)
+  local ok_current, current = pcall(function() return parameter.value end)
+  if not ok_current then return nil end
+  local ok_direct = pcall(function() parameter.value_string = wanted end)
+  if ok_direct then
+    local ok_read, actual = pcall(function() return parameter.value_string end)
+    if ok_read and labels_equal(actual, wanted) then
+      local ok_value, value = pcall(function() return parameter.value end)
+      if ok_value then return value end
+    end
+  end
+  pcall(function() parameter.value = current end)
+  local ok_min, minimum = pcall(function() return parameter.value_min end)
+  local ok_max, maximum = pcall(function() return parameter.value_max end)
+  local ok_quantum, quantum = pcall(function() return parameter.value_quantum end)
+  if not (ok_min and ok_max) then return nil end
+  if type(minimum) ~= "number" or type(maximum) ~= "number" then return nil end
+  if not ok_quantum then quantum = nil end
+  if type(quantum) == "number" and quantum > 0 then
+    local steps = math.floor((maximum - minimum) / quantum + 0.5)
+    if steps + 1 > MAX_LABEL_PROBES then return nil end
+    for step = 0, steps do
+      local value = minimum + step * quantum
+      local ok_set = pcall(function() parameter.value = value end)
+      if ok_set then
+        local ok_read, actual = pcall(function() return parameter.value_string end)
+        if ok_read and labels_equal(actual, wanted) then return value end
+      end
+    end
+  else
+    -- Some bindings report no quantum for an enumerated parameter. Sampling the
+    -- range still finds the option because assigning a value snaps to the
+    -- nearest one. Use the middle of the matching range so the saved value is
+    -- not sitting on an option boundary.
+    local samples = MAX_LABEL_PROBES - 1
+    local first_match, last_match
+    for step = 0, samples do
+      local value = minimum + (maximum - minimum) * step / samples
+      local ok_set = pcall(function() parameter.value = value end)
+      if ok_set then
+        local ok_read, actual = pcall(function() return parameter.value_string end)
+        if ok_read and labels_equal(actual, wanted) then
+          if not first_match then first_match = value end
+          last_match = value
+        elseif first_match then
+          break
+        end
+      end
+    end
+    if first_match then
+      return (first_match + last_match) / 2
+    end
+  end
+  pcall(function() parameter.value = current end)
+  return nil
+end
+
 -- Re-apply captured parameter values onto the new device, matched by name (with
 -- a one-to-one normalized fallback). Only automatable parameters are written for
 -- track effects; instrument parameters are written directly because Renoise's
--- `is_automatable` is not valid for instrument devices. Returns the number of
--- parameters that were transferred.
+-- `is_automatable` is not valid for instrument devices. Enumerated parameters
+-- whose option set changed are remapped by their display label instead of by
+-- the old normalized value. Returns the number of parameters that were
+-- transferred.
 local function apply_parameter_values(new_device, old_parameters, is_instrument)
   local ok_parameters, parameters = pcall(function() return new_device.parameters end)
-  if not ok_parameters or not parameters then return 0 end
+  -- Return all three results even on failure: the caller treats a nil `mapped`
+  -- as "some parameters mapped", which would suppress the raw bag fallback even
+  -- though nothing could be read.
+  if not ok_parameters or not parameters then return 0, false, 0 end
   local mapping = build_parameter_mapping(parameters, old_parameters, is_instrument)
   local applied = 0
+  local mapped = 0
+  local rejected = false
   for index, old_parameter in ipairs(old_parameters) do
     local target = mapping[index]
     if target then
-      local ok_value, current = pcall(function() return target.value end)
-      if ok_value and parameter_values_equal(current, old_parameter.value, target) then
-        -- Already in the desired state (common after a chunk transplant or a
-        -- matching factory preset): no API call needed, but it counts.
-        applied = applied + 1
-      else
-        local ok_set = pcall(function() target.value = old_parameter.value end)
-        if ok_set then applied = applied + 1 end
+      mapped = mapped + 1
+      local label = trimmed_label(old_parameter.value_string)
+      -- Only genuine option labels use display matching. Continuous controls
+      -- can round to the same string ("0.41") while holding different values
+      -- (0.413 vs 0.410), so they must go through the numeric path below.
+      local try_label = is_enum_parameter(old_parameter)
+      -- A numeric-only label ("40") may belong to a continuous control merely
+      -- formatted as an integer. Only trust the enum classification when the
+      -- replacement is also discrete: a finer-grained replacement makes the
+      -- display match coincidental, so the saved numeric value must be written.
+      if try_label and not looks_like_enum_label(label)
+          and not parameter_is_discrete(target) then
+        try_label = false
+      end
+      local handled = false
+      if try_label then
+        local ok_new_string, new_value_string = pcall(function() return target.value_string end)
+        if ok_new_string and labels_equal(label, new_value_string) then
+          -- The replacement is already on the same option (the matched preset
+          -- may have set it), so leave it alone.
+          applied = applied + 1
+          handled = true
+        else
+          local value = value_for_label(target, label)
+          if value ~= nil then
+            local ok_set = pcall(function() target.value = value end)
+            if ok_set then applied = applied + 1 end
+            handled = true
+          else
+            -- An enum option with no matching option must keep the base
+            -- preset's option: writing the old normalized value would land on
+            -- an unrelated entry. This includes numeric-only option banks,
+            -- whose unmapped index must not be replayed.
+            handled = true
+            rejected = true
+          end
+        end
+      end
+      if not handled then
+        local ok_value, current = pcall(function() return target.value end)
+        if ok_value and parameter_values_equal(current, old_parameter.value, target) then
+          -- Already in the desired state (common after a chunk transplant or a
+          -- matching factory preset): no API call needed, but it counts.
+          applied = applied + 1
+        else
+          local ok_set = pcall(function() target.value = old_parameter.value end)
+          if ok_set then applied = applied + 1 end
+        end
       end
     end
   end
-  return applied
+  return applied, rejected, mapped
 end
 
 -- Snapshot the replacement's values before a converted chunk is written, keyed
@@ -860,9 +1073,37 @@ end
 -- plugin's captured parameter values (matched by name) on top -- which is what
 -- actually carries the user's tweaks such as Mix. If no parameters map, we keep
 -- the loaded preset; otherwise we return the synthesized result.
-local function transfer_state(new_device, old_data, preset_names, chunk_mode,
-    old_parameters, old_active_preset, container, patch_names, reaktor, is_instrument,
-    fallback_preset_names)
+local function transfer_state(new_device, old_data, preset_names, chunk_mode, same_format,
+    old_parameters, parameters_complete, old_active_preset, container, patch_names, reaktor,
+    is_instrument, fallback_preset_names)
+  -- A Renoise ParameterBag is only the plugin's exposed parameters, so nothing
+  -- opaque is lost by transferring it by name. Prefer a same-named preset plus
+  -- the parameter overlay in that case: replaying the bag by index carries
+  -- normalized enum values across major versions, where they can select a
+  -- different option (e.g. Saturn 1 "Warm Tape" -> Saturn 2 "Old Tape").
+  local parameter_bag = up_preset.is_parameter_bag(old_data)
+  -- A plugin with no complete set of live parameters to overlay -- a missing
+  -- instrument, or a track device with non-automatable controls -- has only the
+  -- recovered bag. Keep the compatible direct transplant in that case instead
+  -- of selecting a preset and dropping the omitted settings.
+  local has_live_parameters = old_parameters and #old_parameters > 0
+  -- A ParameterBag is only safe to replay when the replacement is the same
+  -- plugin at the same version and format, which is exactly a "direct" chunk
+  -- transfer. A converted (cross-format) transfer would wrap host parameter data
+  -- as native plugin state, so those always use the preset + overlay route.
+  local direct_transfer = chunk_mode == "direct"
+  -- A complete source snapshot is not enough for a direct transfer: the
+  -- replacement may still be missing a writable target for some captured
+  -- control (a renamed or non-automatable parameter). In that case the overlay
+  -- would report success while dropping those saved values, so keep the
+  -- compatible bag transplant whenever the mapping is incomplete.
+  local overlay_complete = has_live_parameters and parameters_complete
+  if overlay_complete and direct_transfer then
+    overlay_complete = replacement_mapping_complete(new_device, old_parameters, is_instrument)
+  end
+  local prefer_name = parameter_bag and not container and not reaktor
+    and (overlay_complete or not direct_transfer)
+
   -- Compatible chunks transplant directly or through a VST3 container. Reaktor
   -- keeps all its state (ensemble + snapshot) in the chunk, exposes no usable
   -- program bank otherwise, and reads its own previous-major chunk, so also
@@ -876,7 +1117,7 @@ local function transfer_state(new_device, old_data, preset_names, chunk_mode,
     baseline = capture_parameter_baseline(new_device, old_parameters, is_instrument)
   end
   local transplanted = false
-  if old_data and old_data ~= "" and (chunk_mode or reaktor) then
+  if not prefer_name and old_data and old_data ~= "" and (chunk_mode or reaktor) then
     transplanted = transplant_chunk(new_device, old_data, old_active_preset,
       chunk_mode or "direct")
     -- A converted chunk that the plugin silently ignores reads back as a valid
@@ -925,8 +1166,11 @@ local function transfer_state(new_device, old_data, preset_names, chunk_mode,
   -- Overlay the old plugin's saved parameter values on top of the base. This is
   -- what actually carries the user's tweaks (e.g. Mix) across formats. Skip it
   -- when the full state was transplanted, which would otherwise clobber the patch.
+  local label_rejected = false
+  local mapped = 0
   if not transplanted and old_parameters and #old_parameters > 0 then
-    local applied = apply_parameter_values(new_device, old_parameters, is_instrument)
+    local applied
+    applied, label_rejected, mapped = apply_parameter_values(new_device, old_parameters, is_instrument)
     if applied > 0 then
       return "params", tostring(applied)
     end
@@ -937,6 +1181,20 @@ local function transfer_state(new_device, old_data, preset_names, chunk_mode,
   end
   if preset_loaded then
     return "name"
+  end
+
+  -- A same-format ParameterBag that could not be mapped by name (no matching
+  -- preset and no writable parameters) is still better replayed than left at
+  -- default state, even though enum values may shift. Cross-format bags must
+  -- never be replayed by index: their parameter layouts are not compatible.
+  -- Do not replay when any parameter mapped: the overlay already made a
+  -- deliberate choice (e.g. it kept the replacement's option after rejecting an
+  -- unavailable enum label), and replaying indices would undo it.
+  if prefer_name and same_format and not label_rejected and mapped == 0
+      and old_data and old_data ~= "" then
+    if transplant_chunk(new_device, old_data, old_active_preset, "direct") then
+      return "parameters"
+    end
   end
 
   return nil, "no transfer method succeeded"
@@ -952,7 +1210,7 @@ function up_swap.swap_track_device(song, record, candidate)
   if ok_preset_data then
     old_data = preset_data
   end
-  local old_parameters = snapshot_parameters(old_device, false)
+  local old_parameters, parameters_complete = snapshot_parameters(old_device, false)
   local old_preset_name = up_preset.extract_name(old_device)
   local preset_names = preset_name_candidates(record.active_preset_name, old_preset_name)
   local old_active = nil
@@ -993,7 +1251,8 @@ function up_swap.swap_track_device(song, record, candidate)
   local new_device = inserted_or_error
   local automation_count = rebind_automation(captured_automation, new_device)
   local method, err = transfer_state(new_device, old_data, preset_names, chunk_mode,
-    old_parameters, old_active_preset, container, patch_names, reaktor, false)
+    same_format, old_parameters, parameters_complete, old_active_preset, container,
+    patch_names, reaktor, false)
   -- Set is_active last: transfer_state may load a base preset, which can reset
   -- the device to active; applying it afterwards keeps the old bypass state.
   if old_active ~= nil then
@@ -1029,6 +1288,7 @@ function up_swap.swap_instrument(song, record, candidate)
   local plugin_properties = instrument.plugin_properties
   local old_data = nil
   local old_parameters = {}
+  local parameters_complete = true
   local old_preset_name = nil
   local old_active = nil
   local captured_automation = {}
@@ -1037,7 +1297,7 @@ function up_swap.swap_instrument(song, record, candidate)
     if ok_preset_data then
       old_data = preset_data
     end
-    old_parameters = snapshot_parameters(plugin_properties.plugin_device, true)
+    old_parameters, parameters_complete = snapshot_parameters(plugin_properties.plugin_device, true)
     old_preset_name = up_preset.extract_name(plugin_properties.plugin_device)
     local ok_active, is_active = pcall(function() return plugin_properties.plugin_device.is_active end)
     if ok_active then old_active = is_active end
@@ -1130,9 +1390,6 @@ function up_swap.swap_instrument(song, record, candidate)
   end
   local ok_device, new_device = pcall(function() return plugin_properties.plugin_device end)
   new_device = (ok_device and new_device) or nil
-  if old_active ~= nil and new_device then
-    pcall(function() new_device.is_active = old_active end)
-  end
   local automation_count = restore_automation_data(captured_automation, new_device, song)
   if not new_device then
     if record.device_path then
@@ -1146,8 +1403,8 @@ function up_swap.swap_instrument(song, record, candidate)
   end
   if reaktor and container then route_loopback_to(instrument) end
   local method, err = transfer_state(new_device, old_data, preset_names, chunk_mode,
-    old_parameters, old_active_preset, container, patch_names, reaktor, true,
-    fallback_preset_names)
+    same_format, old_parameters, parameters_complete, old_active_preset, container,
+    patch_names, reaktor, true, fallback_preset_names)
   -- transfer_state may load a factory preset, which can reactivate the device;
   -- restore the saved bypass state after the transfer (as the track path does).
   if old_active ~= nil then

@@ -118,3 +118,34 @@ do
     "a raw chunk (no wrapper) is returned unchanged")
   check(up_preset.chunk_bytes("") == "", "an empty value yields empty bytes")
 end
+
+section("up_preset.is_parameter_bag distinguishes parameter bags from native chunks")
+do
+  local function uint32(value)
+    return string.char(value % 256, math.floor(value / 256) % 256,
+      math.floor(value / 65536) % 256, math.floor(value / 16777216) % 256)
+  end
+  local function bag(count, name)
+    local out = uint32(1) .. uint32(1) .. uint32(count) .. uint32(#name)
+    for index = 1, #name do
+      out = out .. name:sub(index, index) .. "\0"
+    end
+    return out .. string.rep("\0", count * 4)
+  end
+  local raw = bag(3, "Bag")
+  check(up_preset.is_parameter_bag(raw), "raw binary parameter bag is recognised")
+  local wrapper = '<?xml version="1.0"?><FilterDevicePreset><DeviceSlot>'
+    .. '<ParameterChunk><![CDATA[' .. up_preset.encode_chunk(raw)
+    .. ']]></ParameterChunk></DeviceSlot></FilterDevicePreset>'
+  check(up_preset.is_parameter_bag(wrapper), "base64-wrapped parameter bag is recognised")
+  check(up_preset.is_parameter_bag(
+    '<FilterDevicePreset><DeviceSlot><ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>'),
+    "declared ParameterBag type is recognised")
+  check(up_preset.is_parameter_bag("\0\0file://Razor.rkplr\0\0") == false,
+    "a native plugin chunk is not a parameter bag")
+  check(up_preset.is_parameter_bag(bag(3, "Bag"):sub(1, -2)) == false,
+    "a truncated bag is not accepted")
+  check(up_preset.is_parameter_bag("") == false, "empty value is not a bag")
+  check(up_preset.is_parameter_bag(nil) == false, "nil is not a bag")
+end
