@@ -153,10 +153,17 @@ Security notes:
   staging step ignores and unstages the generated `opencode.jsonc` and refuses
   to stage at all if it is a symlink, so the bearer cannot leak through
   `git add -A` even when the target branch tracks the file. `.opencode/` is
-  left alone because it holds legitimate agent and skill files.
+  not token-bearing; it is reset to the PR's HEAD content before staging
+  because it holds legitimate agent and skill files.
 - Same-repo guard: the pre-agent `steps:` guard rejects a dispatch whose
   `aw_context` does not name a same-repository pull request, so the agent never
   activates against untrusted fork code with repository secrets available.
+- Base restore: gh-aw restores `.agents`, `.github`, `.opencode`, and
+  `AGENTS.md` from the base branch before the agent runs, so the agent never
+  reads PR-modified instruction files. The prompt snapshots that restore diff
+  and aborts if it changed, then resets those paths to HEAD and removes
+  generated inline skill files before staging, so the reverts and generated
+  files are never pushed.
 - File scope: the fixer may push to any path. The previous `allowed-files`
   allowlist rejected every push whenever the PR also touched a file outside
   the list, because gh-aw validates the branch's cumulative diff rather than
@@ -228,10 +235,17 @@ raised, using the OpenCode CLI.
    `noop` safe-output tool and stop.
 
 2. If there are concrete, actionable issues, address each one (file:line + the
-   fix). You may edit any file the fix requires, including sensitive paths such
-   as `.github/**`, `.agents/**`, `AGENTS.md`, and `README.md`; edits there are
-   flagged to humans by `sensitive-file-warning.yml`, so only touch them when
-   the review genuinely requires it. Do not make unrelated changes.
+   fix). Before editing, snapshot the harness-restored instruction paths: the
+   harness overwrites `.agents`, `.github`, `.opencode`, and `AGENTS.md` with
+   the base branch's versions to isolate trusted instructions, so changes there
+   are not the PR's own content:
+     git diff HEAD -- .agents .github .opencode AGENTS.md > "$RUNNER_TEMP/aw-isolated.diff"
+   Do not edit those base-isolated paths; the staging step aborts if they
+   changed, because committing them would replace the PR's content with
+   base-plus-edit. If a finding needs a change there, explain it in your reply
+   and leave it for a human (advisories are surfaced by
+   `sensitive-file-warning.yml`). You may edit any other file, including
+   `README.md` and `.luacheckrc`. Do not make unrelated changes.
    Keep edits minimal and aligned with the existing code style. Stage the
    changes and create a `fixup!` commit per changed file targeting the commit
    that last touched it, so the branch history stays clean. Only target a commit
@@ -250,6 +264,19 @@ raised, using the OpenCode CLI.
          [ -n "$base" ] && break
        fi
      done
+     # The harness restored the instruction paths from the base branch. Abort
+     # if the agent changed them beyond that restore (committing would replace
+     # the PR's own content), then drop the restore reverts and any generated
+     # inline skills so they are never staged.
+     git diff HEAD -- .agents .github .opencode AGENTS.md > "$RUNNER_TEMP/aw-isolated-now.diff"
+     if ! cmp -s "$RUNNER_TEMP/aw-isolated.diff" "$RUNNER_TEMP/aw-isolated-now.diff"; then
+       echo "refusing to stage: base-restored instruction paths were modified" >&2
+       exit 1
+     fi
+     for p in .agents .github .opencode AGENTS.md; do
+       git checkout HEAD -- "$p" 2>/dev/null || true
+     done
+     git clean -fd -- .opencode >/dev/null 2>&1 || true
      if ! grep -qxF opencode.jsonc .git/info/exclude 2>/dev/null; then
        printf '%s\n' opencode.jsonc >> .git/info/exclude
      fi
