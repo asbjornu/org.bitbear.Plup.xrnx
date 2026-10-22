@@ -50,10 +50,12 @@ safe-outputs:
     max: 1
     signed-commits: false
     github-token: ${{ secrets.GH_AW_PUSH_TOKEN }}
-    # No `allowed-files` allowlist: the fixer may push to any path. gh-aw's
-    # default protected-files "request-review" policy is also disabled so a push
-    # is never refused or downgraded; sensitive paths are surfaced to humans as a
-    # PR comment by sensitive-file-warning.yml instead (see the notes below).
+    # No `allowed-files` allowlist: the fixer may push to any non-workflow path.
+    # gh-aw's default protected-files "request-review" policy is also disabled
+    # so a push is not downgraded for sensitive paths; those are surfaced to
+    # humans as a PR comment by sensitive-file-warning.yml instead. The separate
+    # workflow-scope preflight still refuses any PR branch that touches
+    # `.github/workflows/**` (see the notes below).
     protected-files: allowed
   reply-to-pull-request-review-comment:
     max: 100
@@ -176,8 +178,12 @@ Security notes:
   `.github/**`, `.agents/**`, `AGENTS.md`, `README.md`, `LICENSE`,
   `.luacheckrc`, and dependency manifests. A human decides whether such edits
   are acceptable; the fixer itself is not blocked.
-- Workflow pushes: GH_AW_PUSH_TOKEN carries the `workflow` scope (see the push
-  auth note above), so the fixer can push `.github/workflows/*` changes.
+- Workflow pushes (deferred): the safe-output push handler preflights every
+  `.github/workflows/**` change reachable from the PR branch and refuses the
+  push unless `allow-workflows` is enabled. That flag requires a GitHub App, and
+  a PAT's `workflow` scope does not bypass the handler. The orchestrator
+  therefore defers PRs that touch `.github/workflows/**` to a human. To enable
+  them, configure `safe-outputs.github-app` and set `allow-workflows: true`.
 - Agent read access: `contents: read` is granted so the agent job's
   actions/checkout can fetch the PR head it needs to inspect and edit.
 - Effective token grants: gh-aw's compiled safe_outputs and conclusion jobs
@@ -233,6 +239,10 @@ raised, using the OpenCode CLI.
    PR's current head (`get_pull_request` -> `head.sha`). If they differ, the
    review is stale because the branch moved after it was posted: call the
    `noop` safe-output tool and stop.
+   If the PR's diff touches `.github/workflows/**` (use
+   `get_pull_request_files`), call the `noop` safe-output tool with that reason
+   and stop: the safe-output push handler refuses such a branch unless a GitHub
+   App with `allow-workflows` is configured.
 
 2. If there are concrete, actionable issues, address each one (file:line + the
    fix). Before editing, snapshot the harness-restored instruction paths: the

@@ -142,6 +142,16 @@ jobs:
             if [ -z "$pr" ] || [ "$author" != "$AUTHOR" ]; then
               continue
             fi
+            # The safe-output push handler refuses a PR branch that already
+            # touches .github/workflows unless allow-workflows is enabled, which
+            # needs a GitHub App. Defer those PRs instead of dispatching a run
+            # that cannot push.
+            files=$(gh api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" \
+              --jq '.[].filename' 2>/dev/null || true)
+            if printf '%s\n' "$files" | grep '^\.github/workflows/' >/dev/null; then
+              echo "PR #$pr touches .github/workflows; deferring to a human"
+              continue
+            fi
             head=$(gh api "repos/$REPO/pulls/$pr" --jq '.head.sha')
 
             # Only trust a marker written by a maintainer, so an untrusted
