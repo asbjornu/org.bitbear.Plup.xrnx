@@ -185,6 +185,15 @@ Security notes:
   body-only review has no `pull_request_review_comment` event either. The
   orchestrator records the dispatched review id in a hidden PR comment so each
   review runs at most once.
+- Dispatch trust (accepted): `workflow_dispatch` runs the workflow from the
+  selected ref, so a write collaborator could dispatch a branch-modified copy
+  and read the LLM key from the generated `activation` job. This is accepted.
+  Dispatching requires write access; an external contributor cannot push or
+  select a ref in this repository, and the orchestrator only dispatches
+  same-repo PRs by the configured author. A write collaborator can already
+  reach repository secrets through a same-repo `pull_request` workflow, so this
+  does not widen the trust boundary. The LLM key is additionally bounded by its
+  own credit/spend limits.
 - Companion workflows: `copilot-review-request.yml` requests a Copilot review on
   PR open/ready/synchronize, and `pr-fix-squash.yml` autosquashes the `fixup!`
   commits this agent creates and force-pushes the branch, which re-requests the
