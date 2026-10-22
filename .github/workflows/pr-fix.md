@@ -160,10 +160,10 @@ Security notes:
   activates against untrusted fork code with repository secrets available.
 - Base restore: gh-aw restores `.agents`, `.github`, `.opencode`, and
   `AGENTS.md` from the base branch before the agent runs, so the agent never
-  reads PR-modified instruction files. The prompt snapshots that restore diff
-  and aborts if it changed, then resets those paths to HEAD and removes
-  generated inline skill files before staging, so the reverts and generated
-  files are never pushed.
+  reads PR-modified instruction files. The prompt snapshots the restore diff
+  and untracked list, aborts if either changed, then resets each path to HEAD
+  and removes untracked leftovers before staging, so reverts, base-only files,
+  and generated inline skills are never pushed.
 - File scope: the fixer may push to any path. The previous `allowed-files`
   allowlist rejected every push whenever the PR also touched a file outside
   the list, because gh-aw validates the branch's cumulative diff rather than
@@ -240,6 +240,7 @@ raised, using the OpenCode CLI.
    the base branch's versions to isolate trusted instructions, so changes there
    are not the PR's own content:
      git diff HEAD -- .agents .github .opencode AGENTS.md > "$RUNNER_TEMP/aw-isolated.diff"
+     git ls-files --others --exclude-standard -- .agents .github .opencode AGENTS.md > "$RUNNER_TEMP/aw-isolated.untracked"
    Do not edit those base-isolated paths; the staging step aborts if they
    changed, because committing them would replace the PR's content with
    base-plus-edit. If a finding needs a change there, explain it in your reply
@@ -266,17 +267,21 @@ raised, using the OpenCode CLI.
      done
      # The harness restored the instruction paths from the base branch. Abort
      # if the agent changed them beyond that restore (committing would replace
-     # the PR's own content), then drop the restore reverts and any generated
-     # inline skills so they are never staged.
+     # the PR's own content), then reset each path to HEAD and remove
+     # untracked leftovers so base-only files and generated inline skills are
+     # never staged.
      git diff HEAD -- .agents .github .opencode AGENTS.md > "$RUNNER_TEMP/aw-isolated-now.diff"
-     if ! cmp -s "$RUNNER_TEMP/aw-isolated.diff" "$RUNNER_TEMP/aw-isolated-now.diff"; then
+     git ls-files --others --exclude-standard -- .agents .github .opencode AGENTS.md > "$RUNNER_TEMP/aw-isolated-now.untracked"
+     if ! cmp -s "$RUNNER_TEMP/aw-isolated.diff" "$RUNNER_TEMP/aw-isolated-now.diff" \
+        || ! cmp -s "$RUNNER_TEMP/aw-isolated.untracked" "$RUNNER_TEMP/aw-isolated-now.untracked"; then
        echo "refusing to stage: base-restored instruction paths were modified" >&2
        exit 1
      fi
      for p in .agents .github .opencode AGENTS.md; do
+       git reset -q HEAD -- "$p" 2>/dev/null || true
        git checkout HEAD -- "$p" 2>/dev/null || true
+       git clean -fd -- "$p" >/dev/null 2>&1 || true
      done
-     git clean -fd -- .opencode >/dev/null 2>&1 || true
      if ! grep -qxF opencode.jsonc .git/info/exclude 2>/dev/null; then
        printf '%s\n' opencode.jsonc >> .git/info/exclude
      fi
