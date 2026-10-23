@@ -30,6 +30,23 @@ function up_plugin_analysis.is_product_token(token)
   return not NON_PRODUCT_TOKENS[token]
 end
 
+-- Manufacturer/vendor words normalized away when deciding whether two names
+-- identify the same product for chunk compatibility. Unlike NON_PRODUCT_TOKENS
+-- (a loose-matching stop list), this must NOT drop product qualifiers such as
+-- "one", "ace", "sampler" or "knifonium": those distinguish real products.
+local MANUFACTURER_TOKENS = {
+  fabfilter = true, native = true, instruments = true, sonic = true,
+  academy = true, ["u"] = true, ["he"] = true, apple = true,
+  spitfire = true, orchestral = true, tools = true, lennardigital = true,
+  tal = true, togu = true, alliance = true, hornet = true,
+  syntheway = true, mlvst = true, unfiltered = true, knif = true,
+  bx = true, xfer = true, valhalla = true, dsp = true, audio = true,
+}
+
+function up_plugin_analysis.is_manufacturer_token(token)
+  return MANUFACTURER_TOKENS[token] == true
+end
+
 function up_plugin_analysis.detect_protocol(text)
   if type(text) ~= "string" then return nil end
   local lowercased = text:lower()

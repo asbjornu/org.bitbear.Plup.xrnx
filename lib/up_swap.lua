@@ -23,53 +23,61 @@ local function is_vst2(protocol)
   return protocol == "VST" or protocol == "VST2"
 end
 
--- Significant product words, ignoring vendor/category words that are known to
--- vary between display names (e.g. "Native Instruments: Massive" vs "Massive").
--- Used only for chunk compatibility: candidate discovery and donor matching
--- intentionally stay on the looser same_family() token subset.
-local function product_tokens(analysis)
-  local tokens = up_plugin_analysis.token_set(analysis and (analysis.base or analysis.product) or "")
-  local product = {}
-  for token in pairs(tokens) do
-    if up_plugin_analysis.is_product_token(token) then product[token] = true end
+-- Token sets are compatible when one contains the other and the extra tokens
+-- are only manufacturer/vendor words. is_manufacturer_token() deliberately
+-- retains product qualifiers such as "one", "ace", "sampler" and "knifonium"
+-- (unlike the loose matcher's is_product_token()), so distinct products like
+-- "SynthMaster" vs "SynthMaster One" cannot collapse to the same identity. A
+-- genuine vendor prefix on one side ("u-he ACE" vs "ACE") is still tolerated.
+local function tokens_compatible(a, b)
+  local shorter, longer = a, b
+  if not up_plugin_analysis.token_subset(a, b) then
+    shorter, longer = b, a
+    if not up_plugin_analysis.token_subset(b, a) then return false end
   end
-  return product
+  for token in pairs(longer) do
+    if not shorter[token] and not up_plugin_analysis.is_manufacturer_token(token) then
+      return false
+    end
+  end
+  return true
 end
 
--- Strict same-product check: every significant product word must match, so
--- "Massive" and "Massive X" are different products even though same_family()
--- accepts them via token subset. Chunk state cannot be assumed compatible
--- between different products. Some vendors use names made entirely of words the
--- candidate filter ignores ("u-he ACE", "bx_oberhausen"); for those, fall back
--- to an exact analyzed identity so a same-plugin recovery still works.
 local function normalized_identity(analysis)
   local text = analysis and (analysis.base or analysis.product) or ""
   text = tostring(text):lower():gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
   return text
 end
 
+-- Strict same-product check used for chunk compatibility. Candidate discovery
+-- and donor matching stay on the looser same_family()/token subset, but chunk
+-- state cannot be assumed compatible between related products ("Massive" vs
+-- "Massive X"), even though the matcher may offer the pair.
 local function same_product(old_analysis, new_analysis)
-  local old_tokens = product_tokens(old_analysis)
-  local new_tokens = product_tokens(new_analysis)
+  local old_text = old_analysis and (old_analysis.base or old_analysis.product) or ""
+  local new_text = new_analysis and (new_analysis.base or new_analysis.product) or ""
+  local old_tokens = up_plugin_analysis.token_set(old_text)
+  local new_tokens = up_plugin_analysis.token_set(new_text)
   if next(old_tokens) and next(new_tokens) then
-    return up_plugin_analysis.token_subset(old_tokens, new_tokens)
-      and up_plugin_analysis.token_subset(new_tokens, old_tokens)
+    return tokens_compatible(old_tokens, new_tokens)
   end
   local old_identity = normalized_identity(old_analysis)
   local new_identity = normalized_identity(new_analysis)
   return old_identity ~= "" and old_identity == new_identity
 end
 
--- Version used for chunk compatibility. extract_version() requires whitespace
--- before the number, so product names with attached versions ("Kontakt6") would
--- otherwise look like an unknown version on both sides. Fall back to a trailing
--- version on the cleaned base so attached and spaced forms compare alike.
-local function chunk_version(analysis)
-  if not analysis then return nil end
-  if analysis.version ~= nil then return analysis.version end
-  local product = analysis.base or analysis.product or ""
-  local attached = product:match("(%d+%.?%d*)%s*$")
-  return attached and tonumber(attached) or nil
+-- Every numeric component of an identity, in order. clean_display_name()
+-- normalizes dots to spaces ("Pro-Q 2.0" -> "pro q 2 0"), and a version can be
+-- attached to the product word or followed by a suffix ("Kontakt6 FX"), so
+-- compare all the numbers rather than a single trailing one.
+local function numeric_identity(analysis)
+  local text = analysis and (analysis.base or analysis.product) or ""
+  if type(text) ~= "string" then return "" end
+  local parts = {}
+  for number in text:gmatch("%d+") do
+    parts[#parts + 1] = number
+  end
+  return table.concat(parts, ".")
 end
 
 -- Decide how the old state chunk can be written to the replacement. A matching
@@ -88,7 +96,7 @@ end
 -- parameter overlay. (Container plugins keep their donor/MIDI path.)
 local function chunk_transfer_mode(old_analysis, new_analysis, same_format)
   if not same_product(old_analysis, new_analysis) then return nil end
-  if chunk_version(old_analysis) ~= chunk_version(new_analysis) then return nil end
+  if numeric_identity(old_analysis) ~= numeric_identity(new_analysis) then return nil end
   if same_format then return "direct" end
   local old_protocol = old_analysis and old_analysis.protocol
   local new_protocol = new_analysis and new_analysis.protocol
@@ -1140,6 +1148,11 @@ function up_swap.swap_instrument(song, record, candidate)
   local method, err = transfer_state(new_device, old_data, preset_names, chunk_mode,
     old_parameters, old_active_preset, container, patch_names, reaktor, true,
     fallback_preset_names)
+  -- transfer_state may load a factory preset, which can reactivate the device;
+  -- restore the saved bypass state after the transfer (as the track path does).
+  if old_active ~= nil then
+    pcall(function() new_device.is_active = old_active end)
+  end
   if method then
     local status = method == "parameters" and "upgraded-with-parameters"
       or method == "name" and "upgraded-name-matched-preset"
