@@ -96,6 +96,32 @@ do
     "empty parenthetical does not shadow the real preset name")
 end
 
+section("up_swap.swap_instrument uses a healthy plugin's preset label")
+do
+  -- Renoise renames an instrument to "VST: Massive (Acid Raw)" when that preset
+  -- is selected. Massive exposes no program bank, but the label in the
+  -- instrument name (and therefore Song.xml) is still the host-visible preset
+  -- name and must be used when the replacement does expose a matching preset.
+  local new_dev = {
+    is_active = true, active_preset_data = "", presets = { "Acid Raw", "Other" }, parameters = {} }
+  local pp = {
+    plugin_loaded = true,
+    plugin_device = { device_path = "/P/Massive.au", name = "AU: Native Instruments: Massive",
+      active_preset_data = "", presets = {}, parameters = {} },
+    load_plugin = function(self, _path) self.plugin_device = new_dev; return true end,
+  }
+  local song = { instruments = { { plugin_properties = pp } }, automation = function() return nil end }
+  local rec = { kind = "instrument", instrument_index = 1, broken = false, plugin_loaded = true,
+    instrument_name = "VST: Massive (Acid Raw)",
+    analysis = analyze("VST: Native Instruments: Massive", "/P/Massive.vst", "VST"), device_path = nil }
+  local candidate = analyze("AU: Native Instruments: Massive", "/P/Massive.au", "AU")
+  candidate.path = "/P/Massive.au"
+  local ok, res = pcall(function() return up_swap.swap_instrument(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-name-matched-preset",
+    "the parenthetical preset label from a healthy instrument is used")
+  check(new_dev.active_preset == 1, "the Acid Raw preset is selected by name")
+end
+
 section("up_swap.swap_instrument selects the recovered Reaktor ensemble")
 do
   -- A missing Reaktor exposes no live preset, but its loaded ensemble ("Razor")
@@ -490,7 +516,7 @@ do
   local song_p = { instruments = { { plugin_properties = pp_p } }, tracks = {},
     automation = function() return { is_automated = false } end }
   local okp, rp = pcall(function() return up_swap.swap_instrument(song_p, mkrec("VST3"),
-    { name = "Pro-MB 2", protocol = "VST3", path = "/P/MB2.vst3" }) end)
+    { name = "Pro-MB 2", base = "pro mb", protocol = "VST3", path = "/P/MB2.vst3" }) end)
   check(okp and rp, "swap_instrument transfers same-format preset chunk")
   check(okp and rp and rp.status == "upgraded-with-parameters", "same-format chunk transfer -> parameters")
 
