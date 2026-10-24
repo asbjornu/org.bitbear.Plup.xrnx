@@ -353,12 +353,12 @@ local MAX_LABEL_PROBES = 256
 -- Decide whether an old parameter is an enumerated option that must be remapped
 -- by display label. The textual heuristic above handles mode names ("Warm Tape")
 -- and digit-bearing options ("2x", "Band 2"). Some option banks label choices
--- with bare integers ("1", "2", "4") or integer values with a unit
--- ("24 dB/oct") that carry no textual mode name; the captured quantum reveals
--- them: a quantum that divides the normalized range into a small, bounded number
--- of steps is a discrete option bank, whereas a continuous control's tiny
--- quantum (thousands of steps) or a decimal-formatted numeric label ("0.40",
--- "0.413ms") is excluded.
+-- with bare integers ("1", "2", "4"), integer values with a unit ("24 dB/oct")
+-- or musical-time fractions ("1/4", "1/8") that carry no textual mode name; the
+-- captured quantum reveals them: a quantum that divides the normalized range
+-- into a small, bounded number of steps is a discrete option bank, whereas a
+-- continuous control's tiny quantum (thousands of steps) or a decimal-formatted
+-- numeric label ("0.40", "0.413ms") is excluded.
 local function is_enum_parameter(parameter)
   local label = trimmed_label(parameter.value_string)
   if not label then return false end
@@ -366,20 +366,25 @@ local function is_enum_parameter(parameter)
   local quantum = parameter.value_quantum
   if type(quantum) ~= "number" or quantum <= 0 then return false end
   if (1 / quantum) + 1 > MAX_LABEL_PROBES then return false end
-  -- Accept bare integers and integer-formatted unit labels, but not decimal
-  -- values ("0.40", "0.413ms"), which are continuous controls.
+  -- Accept bare integers, integer-formatted unit labels and musical-time
+  -- fractions, but not decimal values ("0.40", "0.413ms"), which are continuous
+  -- controls.
   return label:match("^[%-%+]?%d+$") ~= nil
     or label:match("^[%-%+]?%d+%s*[%a]") ~= nil
+    or label:match("^%d+/%d+$") ~= nil
 end
 
--- True when a parameter's own quantum reveals a bounded discrete option bank.
--- Used to decide whether a numeric-only label ("40") can be trusted for display
--- equality: a fine-grained continuous control (e.g. quantum 1e-6) is not
--- discrete, so the display match is coincidental and the value must be written.
-local function parameter_is_discrete(parameter)
+-- True when a parameter's own quantum reveals a fine-grained continuous control
+-- (more steps than the label-probe budget, e.g. quantum 1e-6). Used to decide
+-- whether a numeric-only label ("40") can be trusted for display equality: a
+-- fine-grained replacement makes the display match coincidental, so the saved
+-- numeric value must be written. A zero/unknown quantum is not fine-grained:
+-- `value_for_label`'s sampling fallback can still locate the option, so a
+-- numeric-only enum label keeps using the label lookup.
+local function parameter_is_fine_grained(parameter)
   local ok_quantum, quantum = pcall(function() return parameter.value_quantum end)
   return ok_quantum and type(quantum) == "number" and quantum > 0
-    and (1 / quantum) + 1 <= MAX_LABEL_PROBES
+    and (1 / quantum) + 1 > MAX_LABEL_PROBES
 end
 
 -- The replacement value whose display label matches `wanted`. Enumerated
@@ -471,10 +476,12 @@ local function apply_parameter_values(new_device, old_parameters, is_instrument)
       local try_label = is_enum_parameter(old_parameter)
       -- A numeric-only label ("40") may belong to a continuous control merely
       -- formatted as an integer. Only trust the enum classification when the
-      -- replacement is also discrete: a finer-grained replacement makes the
+      -- replacement is not fine-grained: a finer-grained replacement makes the
       -- display match coincidental, so the saved numeric value must be written.
+      -- A zero/unknown replacement quantum keeps the label lookup, because the
+      -- sampling fallback can still find the option.
       if try_label and not looks_like_enum_label(label)
-          and not parameter_is_discrete(target) then
+          and parameter_is_fine_grained(target) then
         try_label = false
       end
       local handled = false

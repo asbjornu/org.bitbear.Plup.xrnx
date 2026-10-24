@@ -930,6 +930,136 @@ do
   check(new_state.value ~= 0.5, "the old normalized value must not select '4'")
 end
 
+section("up_swap remaps fractional musical-time enum labels")
+do
+  -- A quantized tempo-sync bank labels its choices "1/8", "1/4", "1/2". Those
+  -- contain no letters and no bare integer, so the textual and integer
+  -- heuristics miss them; the captured quantum reveals the small discrete bank,
+  -- so the saved "1/4" (0.5 in a 3-option bank) must remap by label to the
+  -- replacement's "1/4" (0.25), not replay 0.5 onto "1/2".
+  local function sync_parameter(labels, quantum, value)
+    local state = { value = value }
+    local function label_for(current)
+      local index = math.floor(current / quantum + 0.5)
+      return labels[index + 1] or "?"
+    end
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Sync" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then return label_for(state.value) end
+        if key == "value_quantum" then return quantum end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value / quantum + 0.5) * quantum
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+
+  local new_param, new_state = sync_parameter({ "1/8", "1/4", "1/2", "1", "2" }, 0.25, 0)
+  local new_dev = { is_active = true, active_preset_data = "", presets = {}, parameters = { new_param } }
+  local old_dev = { is_active = true, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Sync", value = 0.5, is_automatable = true,
+        value_quantum = 0.5, value_string = "1/4" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev)
+      return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Delay.vst", device_name = "VST: Example Delay",
+    analysis = analyze("VST: Example Delay", "/P/Delay.vst", "VST") }
+  local candidate = { name = "Example Delay 2", protocol = "VST", path = "/P/Delay2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth", "the fractional enum overlay completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "the fractional '1/4' remaps to the new bank's index instead of replaying 0.5 as '1/2'")
+  check(new_state.value ~= 0.5, "the old normalized value must not select '1/2'")
+end
+
+section("up_swap keeps label lookup for a zero-quantum numeric enum replacement")
+do
+  -- The replacement reports no quantum, so the discrete-quantum test cannot
+  -- classify it. It is not fine-grained either, so the numeric-only enum label
+  -- must keep using the label lookup; the sampling fallback finds "2" at 0.25
+  -- instead of replaying the old 0.5 onto "4".
+  local function zero_quantum_parameter(labels, step, value)
+    local state = { value = value }
+    local function label_for(current)
+      local index = math.floor(current / step + 0.5)
+      return labels[index + 1] or "?"
+    end
+    return setmetatable({}, {
+      __index = function(_, key)
+        if key == "name" then return "Ratio" end
+        if key == "is_automatable" then return true end
+        if key == "value" then return state.value end
+        if key == "value_string" then return label_for(state.value) end
+        if key == "value_quantum" then return 0 end
+        if key == "value_min" then return 0 end
+        if key == "value_max" then return 1 end
+        return nil
+      end,
+      __newindex = function(_, key, new_value)
+        if key == "value" then
+          state.value = math.floor(new_value / step + 0.5) * step
+        else
+          error("read-only " .. key)
+        end
+      end,
+    }), state
+  end
+
+  local new_param, new_state = zero_quantum_parameter({ "1", "2", "4", "8", "16" }, 0.25, 0)
+  local new_dev = { is_active = true, active_preset_data = "", presets = {}, parameters = { new_param } }
+  local old_dev = { is_active = true, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = {
+      { name = "Ratio", value = 0.5, is_automatable = true,
+        value_quantum = 0.5, value_string = "2" },
+    } }
+  local track = {
+    devices = { [1] = {}, [2] = old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, new_dev)
+      return new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local song = { tracks = { track }, instruments = {},
+    automation = function() return { is_automated = false } end }
+  local rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Comp.vst", device_name = "VST: Example Comp",
+    analysis = analyze("VST: Example Comp", "/P/Comp.vst", "VST") }
+  local candidate = { name = "Example Comp 2", protocol = "VST", path = "/P/Comp2.vst" }
+
+  local ok, res = pcall(function() return up_swap.swap_track_device(song, rec, candidate) end)
+  check(ok and res and res.status == "upgraded-parameter-synth",
+    "the zero-quantum numeric enum overlay completes")
+  check(math.abs(new_state.value - 0.25) < 0.000001,
+    "the sampling fallback finds '2' at 0.25 instead of replaying 0.5 as '4'")
+  check(new_state.value ~= 0.5, "the old normalized value must not select '4'")
+end
+
 section("up_swap bounds exhaustive label probing")
 do
   -- A tiny reported quantum (or a formatted numeric label that never matches)
