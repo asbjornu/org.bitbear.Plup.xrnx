@@ -32,16 +32,20 @@ them while trying to preserve the previous preset/state.
    `FabFilter Pro-MB`) as long as the base name and vendor match.
 3. **Swap + state transfer (per device, pcall-guarded).** For each chosen
    device it inserts the new plugin at the same position, then transfers
-   the old state: (a) if the replacement is the same product at the same
-   version, transplant the old `active_preset_data` directly; across the
-   VST2 ↔ VST3 boundary the engine state is moved into/out of the VST3
-   `.vstpreset` container instead (so a Massive VST → VST3 upgrade keeps
-   its patch); (b) otherwise — a different protocol, or a product/version
-   change such as `Kick` → `Kick 2` even when both are VST — load a
-   same-named factory preset as a base and overlay the old plugin's
-   captured parameter values (matched by name); (c) if no transfer method
-   succeeds, keep the new plugin at default state — strictly better than a
-   missing plugin. The device enabled/bypass flag is preserved.
+   the old state: (a) if the state is a Renoise ParameterBag (only exposed
+   parameter values), load a same-named factory preset first and overlay
+   the old captured values, remapping enumerated parameters by their
+   display label when the option set changed between versions; (b) if the
+   replacement is the same product at the same version and the state is a
+   native plugin chunk, transplant the old `active_preset_data` directly;
+   across the VST2 ↔ VST3 boundary the engine state is moved into/out of
+   the VST3 `.vstpreset` container instead (so a Massive VST → VST3
+   upgrade keeps its patch); (c) otherwise — a different protocol, or a
+   product/version change such as `Kick` → `Kick 2` even when both are
+   VST — load a same-named factory preset as a base and overlay the old
+   plugin's captured parameter values (matched by name); (d) if no transfer
+   method succeeds, keep the new plugin at default state — strictly better
+   than a missing plugin. The device enabled/bypass flag is preserved.
       - **Instrument parameters transfer too.** Renoise documents
         `is_automatable` as invalid for instrument devices, so instrument
         parameters are captured and re-applied directly rather than being
@@ -123,10 +127,6 @@ them while trying to preserve the previous preset/state.
     from the song's `ParameterChunk` (base64 CDATA in `Song.xml`) or the
     instrument name, so the replacement can load that preset from the installed
     plugin's own bank; if no preset matches, it loads at default state.
-    Renoise also renames an instrument to `VST: Massive (Acid Raw)` when a
-    preset is selected, so that parenthetical label is treated as the preset
-    name for healthy and missing plugins alike. It can only be *selected* in a
-    replacement that exposes a real program bank (Massive itself does not).
 - **Broken *track* devices:** detected when `active_preset_data` raises an
   error; these are listed as broken and matched normally from their
   `device_path`/`name`.
@@ -139,13 +139,9 @@ them while trying to preserve the previous preset/state.
 
 - **Preset-name recovery** parses the old `active_preset_data` XML (live
   plugins) or the song's `ParameterChunk` CDATA in `Song.xml` (missing
-  plugins) for a name; this is best-effort and plugin-dependent. Renoise also
-  renames an instrument to `VST: Massive (Acid Raw)` when a preset is selected,
-  so that parenthetical label is treated as the preset name for healthy and
-  missing plugins alike. It can only be *selected* in a replacement that
-  exposes a real program bank (Massive itself does not). When a preset name is
-  found it is loaded from the replacement's own bank, but if nothing matches,
-  state is generally not otherwise transferred for missing plugins.
+  plugins) for a name; this is best-effort and plugin-dependent. When a preset
+  name is found it is loaded from the replacement's own bank, but if nothing
+  matches, state is generally not otherwise transferred for missing plugins.
 - **State transplant** is only attempted for the same product and version;
   a same-format but incompatible chunk (e.g. `Kick` → `Kick 2`, or
   `SynthMaster` → `SynthMaster One`) is never written, so shared parameters
@@ -160,7 +156,11 @@ them while trying to preserve the previous preset/state.
   matched by name; parameters the new plugin doesn't expose (or that aren't
   automatable for track effects) are dropped. Instrument parameters are
   always captured because Renoise's `is_automatable` flag is not valid for
-  instrument devices.
+  instrument devices. ParameterBag state (Renoise's normalized parameter
+  list) is transferred the same way even within a format, so enumerated
+  parameters whose option set changed are matched by their display label
+  instead of replayed as a normalized index (e.g. Saturn 1 "Warm Tape"
+  stays "Warm Tape" in Saturn 2).
 
 ## Testing
 
