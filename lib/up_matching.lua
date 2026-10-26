@@ -170,11 +170,74 @@ function up_matching.build_instrument_pool(song, yield_function, on_progress)
   return pool
 end
 
-function up_matching.vendor_ok(candidate, old_analysis)
-  if old_analysis.vendor == "" or candidate.vendor == "" then
+-- Numeric version components of a plugin identity, extracted separately from
+-- vendor prefixes and product identifiers (see
+-- up_plugin_analysis.version_components). Comparing these keeps a numeric
+-- vendor prefix such as "D16 Group" from looking like a newer version.
+local function version_parts(analysis)
+  local text = analysis and (analysis.base or analysis.product) or ""
+  return up_plugin_analysis.version_components(text)
+end
+
+local function version_less(candidate, old_analysis)
+  local candidate_parts = version_parts(candidate)
+  local old_parts = version_parts(old_analysis)
+  for i = 1, math.max(#candidate_parts, #old_parts) do
+    local candidate_part = candidate_parts[i] or 0
+    local old_part = old_parts[i] or 0
+    if candidate_part ~= old_part then
+      return candidate_part < old_part
+    end
+  end
+  return false
+end
+
+local function protocol_known(analysis)
+  local protocol = analysis and analysis.protocol
+  return type(protocol) == "string" and protocol ~= ""
+end
+
+-- True when replacing old_analysis with candidate would be a downgrade: an
+-- older plugin version or a lower-ranked protocol. Such candidates are never
+-- offered or auto-selected. A cross-version state transfer is unsupported, so
+-- e.g. Kontakt 8 -> Kontakt 7 would load an empty instrument and silently lose
+-- the loaded library.
+--
+-- An unknown candidate protocol is not a confirmed downgrade: VST3 instrument
+-- handles are opaque GUIDs, so the protocol cannot always be recovered from the
+-- name. Those candidates stay in the dropdown, but the UI refuses to
+-- auto-select them while the current plugin has a known protocol.
+function up_matching.is_downgrade(candidate, old_analysis)
+  if not candidate or not old_analysis then
+    return false
+  end
+  if protocol_known(candidate) and protocol_known(old_analysis)
+      and up_plugin_analysis.protocol_rank(candidate.protocol)
+        < up_plugin_analysis.protocol_rank(old_analysis.protocol) then
     return true
   end
-  return candidate.vendor == old_analysis.vendor
+  return version_less(candidate, old_analysis)
+end
+
+-- True when a candidate has no recoverable protocol while the current plugin
+-- does. The UI keeps such a candidate selectable, but never auto-selects it.
+function up_matching.unknown_protocol(candidate, old_analysis)
+  return not protocol_known(candidate) and protocol_known(old_analysis)
+end
+
+local function normalized_vendor(analysis)
+  local vendor = analysis and analysis.vendor
+  if type(vendor) ~= "string" then return "" end
+  return vendor:lower():gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
+end
+
+function up_matching.vendor_ok(candidate, old_analysis)
+  local old_vendor = normalized_vendor(old_analysis)
+  local candidate_vendor = normalized_vendor(candidate)
+  if old_vendor == "" or candidate_vendor == "" then
+    return true
+  end
+  return candidate_vendor == old_vendor
 end
 
 function up_matching.candidate_matches(candidate, old_analysis)
@@ -267,7 +330,8 @@ end
 -- Unlike candidate_matches (strict same-version) this deliberately spans major
 -- versions so an installed newer release is offered as an upgrade. Unlike the
 -- loose token match it never crosses into a different product, so "Pro-Q 3" is
--- never offered for "Pro-L".
+-- never offered for "Pro-L". Older versions and lower protocols are filtered
+-- out by find_candidates, so only real upgrades are listed.
 function up_matching.candidate_matches_family(candidate, old_analysis)
   if not old_analysis then
     return false
@@ -275,7 +339,7 @@ function up_matching.candidate_matches_family(candidate, old_analysis)
   if candidate.path == old_analysis.raw then
     return false
   end
-  if up_plugin_analysis.family_base(candidate.base) ~= up_plugin_analysis.family_base(old_analysis.base) then
+  if up_plugin_analysis.family_key(candidate.base) ~= up_plugin_analysis.family_key(old_analysis.base) then
     return false
   end
   return up_matching.vendor_ok(candidate, old_analysis)
@@ -295,29 +359,40 @@ function up_matching.find_candidates(pool, old_or_record)
   -- offering the identical version back. Newest version + best protocol ranks
   -- first, so the auto-selected replacement is the upgrade.
   local list = {}
+  local matched = false
   for _, candidate in ipairs(pool) do
     if up_matching.candidate_matches_family(candidate, old_analysis) then
-      table.insert(list, candidate)
-    end
-  end
-  if #list == 0 then
-    -- Fall back to the version/name-flexible token match for broken/missing
-    -- plugins (vendor-prefix or artist-suffix asymmetry, e.g. Reaktor5 ->
-    -- Reaktor6, "Kick - Nicky Romero" -> "Kick 2", FF Pro MB -> Pro-MB).
-    for _, candidate in ipairs(pool) do
-      if up_matching.candidate_matches_loose(candidate, old_analysis) then
+      matched = true
+      if not up_matching.is_downgrade(candidate, old_analysis) then
         table.insert(list, candidate)
       end
     end
   end
-  if #list == 0 then
+  if not matched then
+    -- Fall back to the version/name-flexible token match for broken/missing
+    -- plugins (vendor-prefix or artist-suffix asymmetry, e.g. Reaktor5 ->
+    -- Reaktor6, "Kick - Nicky Romero" -> "Kick 2", FF Pro MB -> Pro-MB).
+    for _, candidate in ipairs(pool) do
+      if up_matching.candidate_matches_loose(candidate, old_analysis)
+          and up_matching.vendor_ok(candidate, old_analysis) then
+        matched = true
+        if not up_matching.is_downgrade(candidate, old_analysis) then
+          table.insert(list, candidate)
+        end
+      end
+    end
+  end
+  if not matched then
     -- Last resort: when we could only identify the plugin by its live instrument
     -- name (the .xrns was unreadable and plugin_properties exposed no name), match
     -- on a shared significant token so e.g. "Kick - Nicky Romero" still surfaces
     -- as a "Kick 2" upgrade.
     for _, candidate in ipairs(pool) do
-      if up_matching.candidate_matches_shared(candidate, old_analysis) then
-        table.insert(list, candidate)
+      if up_matching.candidate_matches_shared(candidate, old_analysis)
+          and up_matching.vendor_ok(candidate, old_analysis) then
+        if not up_matching.is_downgrade(candidate, old_analysis) then
+          table.insert(list, candidate)
+        end
       end
     end
   end

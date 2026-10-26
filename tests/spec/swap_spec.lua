@@ -1714,7 +1714,7 @@ do
   end
 
   local new_param, new_state = slope_parameter(
-    { "6 dB/oct", "12 dB/oct", "18 dB/oct", "24 dB/oct", "48 dB/oct" }, 0.25, 0)
+    { "6.0 dB/oct", "12.0 dB/oct", "18.0 dB/oct", "24.0 dB/oct", "48.0 dB/oct" }, 0.25, 0)
   local new_dev = { is_active = true, active_preset_data = "", presets = {}, parameters = { new_param } }
   local old_dev = { is_active = true, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
       .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
@@ -1743,6 +1743,49 @@ do
   check(math.abs(new_state.value - 0.75) < 0.000001,
     "24 dB/oct is remapped by label instead of replayed as 18 dB/oct")
   check(new_state.value ~= 0.5, "the old normalized value must not select 18 dB/oct")
+
+  -- A unit-bearing bank is still discrete: expanding it inserts options that a
+  -- linear envelope would traverse.
+  local expanded_new, expanded_state = slope_parameter(
+    { "12 dB/oct", "18 dB/oct", "24 dB/oct", "36 dB/oct", "48 dB/oct" }, 0.25, 0)
+  local expanded_new_dev = { is_active = true, active_preset_data = "", presets = {},
+    parameters = { expanded_new } }
+  local expanded_old_param = slope_parameter(
+    { "12 dB/oct", "24 dB/oct", "48 dB/oct" }, 0.5, 0)
+  local expanded_old_dev = { is_active = true, presets = {}, active_preset_data = '<FilterDevicePreset><DeviceSlot>'
+      .. '<ParameterChunkType>ParameterBag</ParameterChunkType>'
+      .. '<ParameterChunk><![CDATA[]]></ParameterChunk></DeviceSlot></FilterDevicePreset>',
+    parameters = { expanded_old_param } }
+  local expanded_automation = { is_automated = true, playback_mode = 2,
+    points = { { time = 0, value = 0 }, { time = 1, value = 1 } } }
+  local expanded_track = {
+    devices = { [1] = {}, [2] = expanded_old_dev },
+    insert_device_at = function(self, _path, index)
+      table.insert(self.devices, index, expanded_new_dev); return expanded_new_dev
+    end,
+    delete_device_at = function(self, index) table.remove(self.devices, index) end,
+  }
+  local expanded_song = {
+    tracks = { expanded_track }, instruments = {},
+    automation = function(_, value)
+      if value == expanded_old_param then return expanded_automation end
+      return { is_automated = false }
+    end,
+  }
+  local expanded_rec = { kind = "track", track_index = 1, device_index = 2, is_plugin = true,
+    device_path = "/P/Saturn2-old.vst", device_name = "VST: FabFilter: Saturn 2",
+    analysis = analyze("VST: FabFilter: Saturn 2", "/P/Saturn2-old.vst", "VST") }
+  local expanded_candidate = { name = "FabFilter Saturn 2", protocol = "VST", path = "/P/Saturn2.vst" }
+  local ok_expanded, expanded_res = pcall(function()
+    return up_swap.swap_track_device(expanded_song, expanded_rec, expanded_candidate)
+  end)
+  check(ok_expanded and expanded_res and expanded_res.status == "upgraded-parameter-synth",
+    "the expanded slope-bank overlay completes")
+  check(expanded_automation.device_parameter == nil,
+    "an expanded unit-bearing bank is not replayed")
+  check(expanded_state.value == 0, "the replacement's base slope is preserved")
+  check(expanded_res.detail and expanded_res.detail:find("automation dropped", 1, true) ~= nil,
+    "the expanded slope-bank automation loss is reported")
 end
 
 section("up_swap writes a continuous value displayed as an integer")

@@ -14,6 +14,50 @@ do
   local a2 = up_plugin_analysis.analyze_plugin(nil, "VST: Sonic Academy: Kick - Nicky Romero")
   check(a2.base:find("kick") ~= nil and a2.base:find("nicky") ~= nil,
     "base includes artist suffix tokens")
+
+  -- VST3 instruments can be exposed as opaque GUID handles, which carry no
+  -- readable protocol token. Recover VST3 from the handle shape.
+  local vst3 = up_plugin_analysis.analyze_plugin(
+    "{A1B2C3D4-0000-0000-0000-000000000000}", "Audio Damage: Rough Rider 3")
+  check(vst3.protocol == "VST3",
+    "opaque GUID handle takes precedence over substring protocol inference")
+  local vendor_a = up_plugin_analysis.analyze_plugin(nil, "VST: Vendor A: Compressor 2")
+  check(vendor_a.vendor == "vendor a", "explicit vendor prefix is preserved")
+end
+
+section("up_plugin_analysis family_key / version_components")
+do
+  check(up_plugin_analysis.family_key("native instruments: reaktor 5") == "reaktor",
+    "family_key strips the vendor prefix")
+  check(up_plugin_analysis.family_key("reaktor 6") == "reaktor",
+    "family_key keeps vendor-less names addressable")
+  check(up_plugin_analysis.family_key("d16 group: phoscyon 2") == "phoscyon",
+    "family_key handles numeric vendor prefixes")
+  check(up_plugin_analysis.family_key("fabfilter pro q 3 1") == "pro q",
+    "family_key strips the complete dotted version run")
+  check(up_plugin_analysis.family_key("ozone 11 equalizer") == "ozone equalizer",
+    "family_key strips a release number before a qualifier")
+  check(up_plugin_analysis.family_key("ozone 12 equalizer") == "ozone equalizer",
+    "qualified releases share one family key")
+
+  local function joined(text)
+    return table.concat(up_plugin_analysis.version_components(text), ".")
+  end
+  check(joined("d16 group: phoscyon 1") == "1",
+    "version_components ignores a numeric vendor prefix")
+  check(joined("phoscyon 2") == "2", "version_components reads a spaced version")
+  check(joined("kontakt8") == "8", "version_components reads an attached version")
+  check(joined("kontakt6 fx") == "6",
+    "version_components reads an attached version before a suffix")
+  check(joined("kontakt 8 1 fx") == "8.1",
+    "version_components keeps every component of a dotted version before FX")
+  check(joined("ozone 11 equalizer") == "11",
+    "version_components reads a release number before a product qualifier")
+  check(joined("kontakt 8 library") == "8",
+    "version_components reads a release number before a library qualifier")
+  check(joined("pro q 2 0") == "2", "version_components reads dotted versions and trims zeroes")
+  check(joined("8dio adagio 2") == "2",
+    "version_components ignores a leading numeric vendor")
 end
 
 section("up_plugin_analysis.is_native_path (native namespace, not vendor)")

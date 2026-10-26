@@ -547,7 +547,10 @@ local function value_for_label(parameter, wanted, preferred, allow_rounding)
       local ok_set = pcall(function() parameter.value = value end)
       if ok_set then
         local ok_read, actual = pcall(function() return parameter.value_string end)
-        if ok_read and labels_equal(actual, wanted) then return value end
+        if ok_read and (labels_equal(actual, wanted)
+            or numeric_labels_equivalent(wanted, actual, false)) then
+          return value
+        end
       end
     end
   else
@@ -562,7 +565,8 @@ local function value_for_label(parameter, wanted, preferred, allow_rounding)
       local ok_set = pcall(function() parameter.value = value end)
       if ok_set then
         local ok_read, actual = pcall(function() return parameter.value_string end)
-        if ok_read and labels_equal(actual, wanted) then
+        if ok_read and (labels_equal(actual, wanted)
+            or numeric_labels_equivalent(wanted, actual, false)) then
           if not first_match then first_match = value end
           last_match = value
         elseif first_match then

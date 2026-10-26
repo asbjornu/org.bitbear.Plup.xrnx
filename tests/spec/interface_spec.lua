@@ -72,6 +72,55 @@ do
   check(ok_dlg, "show_dialog + scan flow runs headlessly" .. (ok_dlg and "" or (": " .. tostring(err_dlg))))
 end
 
+section("up_ui keeps current instead of auto-selecting a downgrade")
+do
+  local up_ui = require("up_ui")
+  up_ui._view_builder = _G.renoise.ViewBuilder
+  up_ui._list_box = up_ui._view_builder:column{}
+  up_ui._scrollbar = up_ui._view_builder:scrollbar{
+    width = 16, height = 340, min = 0, max = 12, step = 1, pagestep = 12 }
+  up_ui._status_text = up_ui._view_builder:text{ text = "" }
+  up_ui._upgrade_btn = up_ui._view_builder:button{ text = "Upgrade", active = false }
+  up_ui.clear_list()
+  up_ui._saved_sel = nil
+
+  local rec = { kind = "instrument", instrument_index = 42,
+    instrument_name = "Kontakt 8",
+    device_name = "VST3: Native Instruments: Kontakt 8",
+    analysis = analyze("VST3: Native Instruments: Kontakt 8", "/P/Kontakt8.vst3", "VST3") }
+  local older = analyze("VST3: Native Instruments: Kontakt 7", "/P/Kontakt7.vst3", "VST3")
+  local same = analyze("VST3: Native Instruments: Kontakt 8", "/P/Kontakt8.vst3", "VST3")
+
+  local rc = { entry = rec, candidates = { older }, candidate = older }
+  up_ui._results = { rc }
+  up_ui.found_row(rec)
+  up_ui._fill_idx = #up_ui._row_views - 1
+  up_ui.fill_row(rc)
+  check(up_ui._row_views[#up_ui._row_views].popup.value == 1,
+    "Kontakt 8 keeps current when the only candidate is Kontakt 7")
+
+  rc.candidates = { older, same }
+  rc.candidate = same
+  up_ui._fill_idx = #up_ui._row_views - 1
+  up_ui.fill_row(rc)
+  check(up_ui._row_views[#up_ui._row_views].popup.value == 3,
+    "Kontakt 8 auto-selects Kontakt 8 over Kontakt 7")
+
+  -- A candidate whose protocol could not be recovered is offered but not
+  -- auto-selected while the current plugin's protocol is known.
+  local unknown = analyze("Sonic Academy: Kick 2", "/P/Kick2", nil)
+  local kick_rec = { kind = "instrument", instrument_index = 43,
+    instrument_name = "Kick",
+    device_name = "VST: Sonic Academy: Kick",
+    analysis = analyze("VST: Sonic Academy: Kick", "/P/Kick.vst", "VST") }
+  local rc_unknown = { entry = kick_rec, candidates = { unknown }, candidate = unknown }
+  up_ui.found_row(kick_rec)
+  up_ui._fill_idx = #up_ui._row_views - 1
+  up_ui.fill_row(rc_unknown)
+  check(up_ui._row_views[#up_ui._row_views].popup.value == 1,
+    "an unknown-protocol candidate is not auto-selected")
+end
+
 section("up_ui.show_dialog clears stale in-progress flags")
 do
   local up_ui = require("up_ui")
