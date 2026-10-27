@@ -133,6 +133,32 @@ function up_preset.chunk_bytes(data)
   return data
 end
 
+-- True when `data` is Renoise's generic parameter bag rather than a plugin's own
+-- opaque preset chunk. Renoise serializes some plugins (VST2 on macOS, among
+-- others) as an XML wrapper whose <ParameterChunkType> is "ParameterBag"; the
+-- CDATA itself is then a small binary header (two uint32 version fields, a
+-- parameter count, a UTF-16 preset name) followed by that many float32 values.
+-- Such state contains only exposed parameter values, so it can be transferred
+-- by parameter name instead of replaying the raw bag by index.
+function up_preset.is_parameter_bag(data)
+  if type(data) ~= "string" or data == "" then return false end
+  if data:find("<ParameterChunkType>%s*ParameterBag%s*</ParameterChunkType>") then
+    return true
+  end
+  local bytes = up_preset.chunk_bytes(data)
+  if #bytes < 16 then return false end
+  local function uint32(offset)
+    local a, b, c, d = bytes:byte(offset, offset + 3)
+    if not d then return nil end
+    return a + b * 256 + c * 65536 + d * 16777216
+  end
+  if uint32(1) ~= 1 or uint32(5) ~= 1 then return false end
+  local count = uint32(9)
+  local name_length = uint32(13)
+  if not count or not name_length then return false end
+  return 16 + name_length * 2 + count * 4 == #bytes
+end
+
 -- Pure-Lua base64 encoder, used to put a recovered plugin binary back into the
 -- <ParameterChunk><![CDATA[...]]></ParameterChunk> of Renoise's active_preset_data
 -- XML wrapper.
