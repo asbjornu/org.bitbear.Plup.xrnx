@@ -543,16 +543,18 @@ end
 
 -- Pick the auto-selected replacement: prefer a candidate on the same protocol
 -- as the entry, otherwise a higher-ranked protocol (a real upgrade). Never
--- auto-switch to a *lower* protocol (e.g. don't move a VST3 instance onto AU).
--- Returns the 1-based popup index, or 1 ("Keep current") when none qualify.
+-- auto-switch to a lower protocol or an older version (e.g. don't move a VST3
+-- instance onto AU, or Kontakt 8 onto Kontakt 7). A candidate whose protocol
+-- cannot be recovered stays manually selectable but is not auto-selected while
+-- the current plugin's protocol is known. Returns the 1-based popup index, or 1
+-- ("Keep current") when none qualify.
 local function auto_select_index(candidates, entry)
-  local ep = entry.analysis and entry.analysis.protocol
-  local er = up_plugin_analysis.protocol_rank(ep)
+  local old_analysis = entry and entry.analysis
   local best_i, best_score
   for i, c in ipairs(candidates) do
-    local cr = up_plugin_analysis.protocol_rank(c.protocol)
-    if cr >= er then
-      local score = cr * 1000 + (c.version or 0)
+    if not up_matching.is_downgrade(c, old_analysis)
+        and not up_matching.unknown_protocol(c, old_analysis) then
+      local score = up_plugin_analysis.rank(c)
       if not best_score or score > best_score then
         best_score = score
         best_i = i

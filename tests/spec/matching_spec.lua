@@ -80,13 +80,126 @@ do
   check(#candidates_for("VST: Kick - Nicky Romero ()", newKick, false) == 1,
     "Kick - Nicky Romero (name only) -> Kick 2 via shared token")
   -- same-product upgrade still matches on the shared product token.
-  local reaktor = { analyze("Reaktor6", "/P/Reaktor6.app", "AU") }
+  local reaktor = { analyze("VST: Reaktor6", "/P/Reaktor6.vst", "VST") }
   check(#candidates_for("VST: Reaktor5 (Make It Bright)", reaktor, false) == 1,
     "Reaktor5 (name only) -> Reaktor6 via shared product token")
   -- but a DIFFERENT product must not match (no shared product token).
   local pq = { analyze("VST3: FabFilter Pro-Q 3", "/P/ProQ3.vst3", "VST3") }
   check(#candidates_for("VST: Reaktor5 (Make It Bright)", pq, false) == 0,
     "Reaktor5 (name only) does NOT match Pro-Q 3 (different product)")
+end
+
+section("up_matching.find_candidates never offers downgrades")
+do
+  local older_kontakt = analyze("VST3: Native Instruments: Kontakt 7",
+    "/P/Kontakt7.vst3", "VST3")
+  check(#candidates_for("VST3: Native Instruments: Kontakt 8", { older_kontakt }, false) == 0,
+    "Kontakt 8 is not downgraded to an installed Kontakt 7")
+
+  local same_kontakt = analyze("VST3: Native Instruments: Kontakt 8",
+    "/P/Kontakt8.vst3", "VST3")
+  local kontakt = candidates_for("VST3: Native Instruments: Kontakt 8",
+    { older_kontakt, same_kontakt }, false)
+  check(#kontakt == 1 and kontakt[1].version == 8,
+    "only the same/newer Kontakt version is offered")
+
+  -- The version may be glued to the product word in some plugin lists.
+  check(#candidates_for("VST3: Kontakt8",
+    { analyze("VST3: Kontakt7", "/P/Kontakt7.vst3", "VST3") }, false) == 0,
+    "glued Kontakt8 is not downgraded to Kontakt7")
+  check(#candidates_for("VST3: Kontakt 8.1 FX",
+    { analyze("VST3: Kontakt 7 FX", "/P/Kontakt7FX.vst3", "VST3") }, false) == 0,
+    "dotted Kontakt 8.1 FX is not downgraded to Kontakt 7 FX")
+  check(#candidates_for("VST3: iZotope Ozone 11 Equalizer",
+    { analyze("VST3: iZotope Ozone 10 Equalizer", "/P/Ozone10.vst3", "VST3") }, false) == 0,
+    "Ozone 11 Equalizer is not downgraded to Ozone 10 Equalizer")
+  local ozone_au = analyze("AU: iZotope Ozone 11 Equalizer", "/P/Ozone11.au", "AU")
+  local ozone_clap = analyze("CLAP: iZotope Ozone 12 Equalizer", "/P/Ozone12.clap", "CLAP")
+  local ozone = candidates_for("VST3: iZotope Ozone 11 Equalizer",
+    { ozone_au, ozone_clap }, false)
+  check(#ozone == 1 and ozone[1].protocol == "CLAP",
+    "a rejected same-version Ozone AU match does not hide the newer CLAP release")
+
+  -- Different explicit vendors must not be merged just because the product
+  -- family and release numbers match.
+  local vendor_a = analyze("VST: Vendor A: Compressor 3", "/P/CompA.vst", "VST")
+  local vendor_b = analyze("CLAP: Vendor B: Compressor 3", "/P/CompB.clap", "CLAP")
+  local compressors = candidates_for("VST: Vendor A: Compressor 2",
+    { vendor_a, vendor_b }, false)
+  check(#compressors == 1 and compressors[1].name:find("Vendor A") ~= nil,
+    "a different explicit vendor is not offered as a replacement")
+  local unprefixed = analyze("VST: Compressor 3", "/P/Comp.vst", "VST")
+  check(#candidates_for("VST: Vendor A: Compressor 2", { unprefixed }, false) == 1,
+    "a candidate without a vendor prefix remains matchable")
+
+  -- A rejected older dotted release must not hide a valid newer one.
+  local proq30 = analyze("VST3: FabFilter Pro-Q 3.0",
+    "/P/ProQ30.vst3", "VST3")
+  local proq40 = analyze("VST3: FabFilter Pro-Q 4.0",
+    "/P/ProQ40.vst3", "VST3")
+  local proq = candidates_for("VST3: FabFilter Pro-Q 3.1",
+    { proq30, proq40 }, false)
+  check(#proq == 1 and proq[1].name:find("Pro%-Q 4%.0") ~= nil,
+    "an older dotted release does not hide a newer dotted release")
+
+  -- A downgrade-only family match must not fall through to looser matching and
+  -- surface a different product that merely shares a token.
+  local older_plain = analyze("VST3: Kontakt 7", "/P/Kontakt7.vst3", "VST3")
+  local kontakt_library = analyze("VST3: Kontakt 8 Library",
+    "/P/Kontakt8Library.vst3", "VST3")
+  check(#candidates_for("VST3: Kontakt 8",
+    { older_plain, kontakt_library }, false) == 0,
+    "a downgrade-only family match does not fall through to a loose match")
+
+  -- A numeric vendor prefix must not look like a newer version.
+  local phoscyon1 = analyze("VST3: D16 Group: Phoscyon 1",
+    "/P/Phoscyon1.vst3", "VST3")
+  check(#candidates_for("VST: Phoscyon 2", { phoscyon1 }, false) == 0,
+    "numeric vendor prefix does not mask an older Phoscyon release")
+  local phoscyon3 = analyze("VST3: D16 Group: Phoscyon 3",
+    "/P/Phoscyon3.vst3", "VST3")
+  local phoscyon = candidates_for("VST: Phoscyon 2", { phoscyon1, phoscyon3 }, false)
+  check(#phoscyon == 1 and phoscyon[1].version == 3,
+    "the newer Phoscyon release is still offered")
+
+  -- An older release carrying the vendor prefix must not hide a newer release
+  -- whose display name omits it.
+  local reaktor4 = analyze("AU: Native Instruments: Reaktor4",
+    "/P/Reaktor4.au", "AU")
+  local reaktor6 = analyze("VST3: Reaktor6", "/P/Reaktor6.vst3", "VST3")
+  local reaktor = candidates_for("AU: Native Instruments: Reaktor5",
+    { reaktor4, reaktor6 }, false)
+  check(#reaktor == 1 and reaktor[1].name:find("Reaktor6") ~= nil,
+    "an older vendor-prefixed release does not hide a newer unprefixed one")
+
+  -- An unknown protocol is not a confirmed downgrade: keep the candidate
+  -- offered (the UI separately refuses to auto-select it).
+  local unknown = analyze("Sonic Academy: Kick 2", "/P/Kick2", nil)
+  check(unknown.protocol == nil, "fixture has no recoverable protocol")
+  check(not up_matching.is_downgrade(unknown,
+    analyze("VST: Sonic Academy: Kick", "/P/Kick.vst", "VST")),
+    "an unknown protocol is not a confirmed downgrade")
+  check(#candidates_for("VST: Sonic Academy: Kick", { unknown }, false) == 1,
+    "an unknown-protocol candidate remains offered")
+
+  -- An older version is a downgrade even when the protocol is higher.
+  local old_vst3 = analyze("VST3: FabFilter Pro-Q 3", "/P/ProQ3.vst3", "VST3")
+  local older_clap = analyze("CLAP: FabFilter Pro-Q 2", "/P/ProQ2.clap", "CLAP")
+  check(up_matching.is_downgrade(older_clap, old_vst3),
+    "an older version is a downgrade even on a higher protocol")
+
+  -- A lower protocol is a downgrade at the same version.
+  local au_same = analyze("AU: FabFilter Pro-Q 3", "/P/ProQ3.au", "AU")
+  check(up_matching.is_downgrade(au_same, old_vst3),
+    "a lower protocol is a downgrade at the same version")
+  check(#candidates_for("VST3: FabFilter Pro-Q 3", { au_same }, false) == 0,
+    "VST3 is not downgraded to AU")
+
+  -- A higher protocol at the same version is still a real upgrade.
+  local clap_same = analyze("CLAP: FabFilter Pro-Q 3", "/P/ProQ3.clap", "CLAP")
+  local upgrades = up_matching.find_candidates({ au_same, clap_same }, old_vst3)
+  check(#upgrades == 1 and upgrades[1].protocol == "CLAP",
+    "a higher protocol at the same version is offered")
 end
 
 section("up_matching.build_instrument_pool (VST3 opaque paths)")
@@ -104,9 +217,10 @@ do
   check(names["Sonic Academy: Kick 2"], "VST3 instrument with opaque path is kept in pool")
   check(names["FabFilter Pro-L 2"], "VST instrument with real path is kept in pool")
   local cands = up_matching.find_candidates(pool,
-    { analysis = up_plugin_analysis.analyze_plugin(nil, "Sonic Academy: Kick") })
-  check(#cands == 1 and cands[1].name:find("Kick 2") ~= nil,
-    "old Kick -> Kick 2 candidate found in instrument pool")
+    { analysis = analyze("VST: Sonic Academy: Kick", "/P/Kick.vst", "VST") })
+  check(#cands == 1 and cands[1].name:find("Kick 2") ~= nil
+      and cands[1].protocol == "VST3",
+    "old VST Kick -> opaque-handle VST3 Kick 2 candidate found in instrument pool")
 end
 
 section("up_matching.build_instrument_pool keeps Native Instruments plugins")
@@ -384,4 +498,16 @@ do
   -- No candidate matches -> empty list.
   local none = up_matching.find_candidates({ analyze("VST: Serum", "/P/Serum.vst", "VST") }, oldf)
   check(#none == 0, "find_candidates returns empty when nothing matches")
+
+  -- An explicit vendor mismatch must not be rescued by the loose or shared
+  -- tiers: only the unrelated vendor's product is installed.
+  local oldv = analyze("VST: Vendor A: Compressor 2", "/P/AComp.vst", "VST")
+  local sharedv = up_matching.find_candidates({
+    analyze("CLAP: Vendor B: Compressor 3", "/P/BComp.clap", "CLAP"),
+  }, oldv)
+  check(#sharedv == 0, "mismatched vendor: shared-token tier rejected")
+  local loosev = up_matching.find_candidates({
+    analyze("VST: Vendor A Audio: Compressor 3", "/P/AAComp.vst", "VST"),
+  }, oldv)
+  check(#loosev == 0, "overlapping vendor tokens: loose tier rejected")
 end

@@ -105,6 +105,122 @@ function up_plugin_analysis.family_base(text)
   return lowercased
 end
 
+-- Remove a leading vendor/manufacturer prefix so the same product matches with
+-- or without it: "Native Instruments: Reaktor 5" and "Reaktor 6", or
+-- "D16 Group: Phoscyon 1" and "Phoscyon 2". A colon separated prefix is
+-- authoritative; without one only known manufacturer words are stripped.
+local function strip_vendor_prefix(text)
+  if type(text) ~= "string" then return "" end
+  local product = text:match(":%s*(.-)%s*$")
+  if product and product ~= "" then
+    text = product
+  end
+  while true do
+    local word, rest = text:match("^(%S+)%s+(.+)$")
+    if not word or not MANUFACTURER_TOKENS[word] then break end
+    text = rest
+  end
+  return text:match("^%s*(.-)%s*$") or text
+end
+
+-- Split a normalized product name into whitespace-delimited words.
+local function split_words(text)
+  local tokens = {}
+  for token in text:gmatch("%S+") do
+    tokens[#tokens + 1] = token
+  end
+  return tokens
+end
+
+-- Remove the complete trailing version run, including attached version digits
+-- ("Kontakt8") and dotted versions normalized to separate words ("pro q 3 1").
+local function strip_trailing_version(text)
+  local tokens = split_words(text)
+  local last = #tokens
+  while last >= 1 do
+    local stem, digits = tokens[last]:match("^(.-)(%d+)$")
+    if not digits then break end
+    if stem == "" or stem == "v" then
+      last = last - 1
+    else
+      tokens[last] = stem
+      break
+    end
+  end
+  local kept = {}
+  for index = 1, last do
+    kept[#kept + 1] = tokens[index]
+  end
+  return table.concat(kept, " ")
+end
+
+-- Product descriptors that may follow the release number, e.g.
+-- "Ozone 11 Equalizer", "Kontakt 8.1 FX" or "Kontakt 8 Library".
+local VERSION_QUALIFIERS = {
+  fx = true, effect = true, effects = true, eq = true,
+  equalizer = true, equaliser = true, compressor = true, limiter = true,
+  reverb = true, delay = true, chorus = true, flanger = true, phaser = true,
+  distortion = true, saturator = true, filter = true, synth = true,
+  synthesizer = true, instrument = true, instruments = true, library = true,
+  factory = true, expansion = true, edition = true, vintage = true,
+  multiband = true, plugin = true, vst = true, vst2 = true, vst3 = true, au = true,
+}
+
+-- Version-agnostic product key used for candidate matching. Unlike family_base
+-- this also drops the vendor prefix, so an installed newer release matches even
+-- when one side's display name omits the vendor (e.g. "Native Instruments:
+-- Reaktor5" <-> "Reaktor6"). family_base itself is kept vendor-prefixed for
+-- donor lookup keys. Release numbers before supported qualifiers are stripped
+-- while the qualifier stays part of the identity, so "Ozone 11 Equalizer" and
+-- "Ozone 12 Equalizer" share the key "ozone equalizer".
+function up_plugin_analysis.family_key(text)
+  if type(text) ~= "string" then return "" end
+  local product = strip_vendor_prefix(text:lower())
+  local tokens = split_words(product)
+  local last = #tokens
+  while last > 0 and VERSION_QUALIFIERS[tokens[last]] do
+    last = last - 1
+  end
+  local core = {}
+  for index = 1, last do
+    core[#core + 1] = tokens[index]
+  end
+  local stem = strip_trailing_version(table.concat(core, " "))
+  local kept = {}
+  if stem ~= "" then kept[#kept + 1] = stem end
+  for index = last + 1, #tokens do
+    kept[#kept + 1] = tokens[index]
+  end
+  return table.concat(kept, " ")
+end
+
+-- Numeric version components at the end of the product name, in order. Only the
+-- trailing numeric run is treated as the version, so numeric vendor prefixes
+-- ("D16 Group: Phoscyon 1", "8Dio Adagio") and product identifiers cannot
+-- corrupt the comparison. Handles attached versions ("Kontakt8"), dotted
+-- versions ("Pro-Q 2.0", normalized to "pro q 2 0") and a supported suffix
+-- ("Kontakt 8.1 FX", "Ozone 11 Equalizer"). Trailing zeroes are trimmed so
+-- "3.0" and "3" compare equal.
+function up_plugin_analysis.version_components(text)
+  if type(text) ~= "string" then return {} end
+  local product = strip_vendor_prefix(text:lower())
+  local tokens = split_words(product)
+  local last = #tokens
+  while last > 0 and VERSION_QUALIFIERS[tokens[last]] do
+    last = last - 1
+  end
+  local components = {}
+  for index = last, 1, -1 do
+    local digits = tokens[index]:match("(%d+)$")
+    if not digits then break end
+    table.insert(components, 1, tonumber(digits))
+  end
+  while #components > 0 and components[#components] == 0 do
+    components[#components] = nil
+  end
+  return components
+end
+
 -- Significant word tokens of a plugin base (version stripped, lowercased),
 -- used for best-effort matching of missing plugins. e.g.
 -- "Sonic Academy: Kick - Nicky Romero" -> {sonic, academy, kick, nicky, romero}
@@ -192,8 +308,27 @@ local function clean_display_name(name, protocol)
   return text
 end
 
+local function extract_vendor(name, protocol)
+  if type(name) ~= "string" then return "" end
+  local text = strip_leading_tag(name, protocol)
+  local vendor = text:match("^%s*([^:]+)%s*:")
+  if not vendor then return "" end
+  return vendor:lower():gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
+end
+
 function up_plugin_analysis.analyze_plugin(path, name)
-  local protocol = up_plugin_analysis.detect_protocol(path) or up_plugin_analysis.detect_protocol(name)
+  -- VST3 instruments are reported with an opaque GUID handle rather than a
+  -- readable path. Let that reliable shape take precedence over name inference:
+  -- detect_protocol() matches substrings, so a name such as "Audio Damage"
+  -- would otherwise be misread as AU.
+  local protocol = up_plugin_analysis.detect_protocol(path)
+  if not protocol and type(path) == "string"
+      and path:match("^%s*{%s*[%x%-]+%s*}%s*$") then
+    protocol = "VST3"
+  end
+  if not protocol then
+    protocol = up_plugin_analysis.detect_protocol(name)
+  end
 
   -- Prefer the human-readable display name (from DeviceInfo/PluginInfo or
   -- device.name). This is the only reliable key for matching across protocols,
@@ -221,7 +356,7 @@ function up_plugin_analysis.analyze_plugin(path, name)
   return {
     raw = path,
     protocol = protocol,
-    vendor = "",
+    vendor = extract_vendor(name, protocol),
     product = product,
     base = base,
     version = version,

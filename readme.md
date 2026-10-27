@@ -29,7 +29,9 @@ them while trying to preserve the previous preset/state.
    (the version is kept, so Pro-Q 2 ≠ Pro-Q 3) and ranks by **CLAP > VST3 >
    VST > AU** and by version. Cross-format / cross-branding upgrades are
    allowed (e.g. an AU `FabFilter FF Pro-MB` can be replaced by a VST3
-   `FabFilter Pro-MB`) as long as the base name and vendor match.
+   `FabFilter Pro-MB`) as long as the base name and vendor match, but a
+   candidate that is an older version or a lower-ranked protocol than the
+   current plugin is never offered (so Kontakt 8 is not replaced by Kontakt 7).
 3. **Swap + state transfer (per device, pcall-guarded).** For each chosen
    device it inserts the new plugin at the same position, then transfers
    the old state: (a) if the state is a Renoise ParameterBag (only exposed
@@ -99,10 +101,11 @@ them while trying to preserve the previous preset/state.
   ("gathering replacements" — the slow part, run concurrently with the song
   scan so rows appear at once).
 - Each row shows the current plugin and a **Replace with** dropdown. By
-  default the best candidate is pre-selected; set a row to **"Keep
-  current"** to leave that device alone. The current device's active preset
-  name is shown when available (for missing plugins it is recovered from
-  `Song.xml`).
+  default the best upgrade is pre-selected; when only an older version or a
+  lower-ranked protocol is installed, **"Keep current"** stays selected. Set
+  any row to **"Keep current"** to leave that device alone. The current
+  device's active preset name is shown when available (for missing plugins it
+  is recovered from `Song.xml`).
 - Press **Upgrade** to swap the selected devices. While running the button
   becomes **Stop** (the swaps already performed are kept). Nothing is
   written to disk unless you save the song yourself.
